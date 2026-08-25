@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { auth } from "./firebaseConfig";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { auth, db } from "./firebaseConfig";
 import {
   BookOpenText,
   Users,
@@ -294,10 +295,61 @@ export default function App() {
     return unsubscribe;
   }, []);
 
+  /* ---- Firestore persistence ----
+     Everything lives in ONE document: kwo/data. That keeps every
+     existing Admin screen's code untouched — they already lift
+     their changes up via onApply(...); we only add a Firestore
+     write alongside each existing setXxx call, and one read on
+     first load. Public visitors can read this document (so the
+     Home Page, Dastoor, Notices, Activities, Encouragement all
+     show real content without logging in) — only a signed-in
+     Admin can write to it (enforced by Firestore security rules
+     in the Firebase Console, not by this code). */
+  const [dataLoaded, setDataLoaded] = useState(false);
+
+  useEffect(() => {
+    async function loadData() {
+      try {
+        const snap = await getDoc(doc(db, "kwo", "data"));
+        if (snap.exists()) {
+          const d = snap.data();
+          if (d.siteConfig) setSiteConfig(d.siteConfig);
+          if (d.cardRegistry) setCardRegistry(d.cardRegistry);
+          if (d.fundConfig) setFundConfig(d.fundConfig);
+          if (d.members) setMembers(d.members);
+          if (d.payments) setPayments(d.payments);
+          if (d.expenses) setExpenses(d.expenses);
+          if (d.dastoorChapters) setDastoorChapters(d.dastoorChapters);
+          if (d.dastoorClauses) setDastoorClauses(d.dastoorClauses);
+          if (d.notices) setNotices(d.notices);
+          if (d.activities) setActivities(d.activities);
+          if (d.achievements) setAchievements(d.achievements);
+        }
+      } catch (err) {
+        console.error("Firestore load failed:", err);
+      }
+      setDataLoaded(true);
+    }
+    loadData();
+  }, []);
+
+  async function persist(partial) {
+    try {
+      await setDoc(doc(db, "kwo", "data"), partial, { merge: true });
+    } catch (err) {
+      console.error("Firestore save failed:", err);
+    }
+  }
+
+  if (!dataLoaded) {
+    return <AuthLoadingScreen theme={DEFAULT_SITE_CONFIG.theme} />;
+  }
+
   function applyChanges(next) {
     setSiteConfig(next.siteConfig);
     setCardRegistry(next.cardRegistry);
     setFundConfig(next.fundConfig);
+    persist({ siteConfig: next.siteConfig, cardRegistry: next.cardRegistry, fundConfig: next.fundConfig });
   }
 
   const ADMIN_ONLY_VIEWS = new Set([
@@ -347,7 +399,7 @@ export default function App() {
       <MembersManagement
         theme={siteConfig.theme}
         members={members}
-        onApply={(nextMembers) => setMembers(nextMembers)}
+        onApply={(nextMembers) => { setMembers(nextMembers); persist({ members: nextMembers }); }}
         onBack={() => setView("admin")}
       />
     );
@@ -360,7 +412,7 @@ export default function App() {
         members={members}
         fundConfig={fundConfig}
         payments={payments}
-        onApply={(nextPayments) => setPayments(nextPayments)}
+        onApply={(nextPayments) => { setPayments(nextPayments); persist({ payments: nextPayments }); }}
         onBack={() => setView("admin")}
       />
     );
@@ -372,7 +424,7 @@ export default function App() {
         theme={siteConfig.theme}
         expenses={expenses}
         currency={fundConfig.currency}
-        onApply={(nextExpenses) => setExpenses(nextExpenses)}
+        onApply={(nextExpenses) => { setExpenses(nextExpenses); persist({ expenses: nextExpenses }); }}
         onBack={() => setView("admin")}
       />
     );
@@ -415,6 +467,7 @@ export default function App() {
         onApply={(nextChapters, nextClauses) => {
           setDastoorChapters(nextChapters);
           setDastoorClauses(nextClauses);
+          persist({ dastoorChapters: nextChapters, dastoorClauses: nextClauses });
         }}
         onBack={() => setView("admin")}
       />
@@ -429,7 +482,7 @@ export default function App() {
         members={members}
         dastoorChapters={dastoorChapters}
         dastoorClauses={dastoorClauses}
-        onApply={(nextNotices) => setNotices(nextNotices)}
+        onApply={(nextNotices) => { setNotices(nextNotices); persist({ notices: nextNotices }); }}
         onBack={() => setView("admin")}
       />
     );
@@ -440,7 +493,7 @@ export default function App() {
       <ActivitiesManagement
         theme={siteConfig.theme}
         activities={activities}
-        onApply={(nextActivities) => setActivities(nextActivities)}
+        onApply={(nextActivities) => { setActivities(nextActivities); persist({ activities: nextActivities }); }}
         onBack={() => setView("admin")}
       />
     );
@@ -453,7 +506,7 @@ export default function App() {
         achievements={achievements}
         members={members}
         payments={payments}
-        onApply={(nextAchievements) => setAchievements(nextAchievements)}
+        onApply={(nextAchievements) => { setAchievements(nextAchievements); persist({ achievements: nextAchievements }); }}
         onBack={() => setView("admin")}
       />
     );
