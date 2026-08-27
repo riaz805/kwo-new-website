@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, collection, getDocs } from "firebase/firestore";
 import { auth, db } from "./firebaseConfig";
 import {
   BookOpenText,
@@ -15,6 +15,7 @@ import {
   FileBarChart,
   Info,
   Phone,
+  Mail,
   Star,
   ShieldCheck,
   ClipboardList,
@@ -241,6 +242,46 @@ const ACHIEVEMENT_TYPES = ["مالی حصہ (Financial)", "رضاکارانہ خ
 const DEFAULT_ACHIEVEMENTS = []; // { id, memberId, title, description, period, type, order, showFinancialContribution, status: 'draft'|'published'|'archived' }
 
 /* ============================================================
+   LIMITED ADMIN ROLES — section keys
+   ------------------------------------------------------------
+   "settings" covers the Admin Panel's own branding/theme/home
+   headings/cards/monthly-fund-amount forms. The rest match the
+   existing admin view names 1:1.
+   ============================================================ */
+const SECTION_KEYS = [
+  "settings", "members", "funds", "expenses", "summary", "reports-admin",
+  "dastoor-admin", "notices-admin", "activities-admin", "achievements-admin", "contact-admin",
+];
+const SECTION_LABELS_UR = {
+  settings: "ویب سائٹ سیٹنگز (برانڈنگ/تھیم/کارڈز/فنڈ رقم)",
+  members: "ممبران کا انتظام",
+  funds: "فنڈز کا انتظام",
+  expenses: "اخراجات کا انتظام",
+  summary: "مالی خلاصہ",
+  "reports-admin": "رپورٹس",
+  "dastoor-admin": "دستور کا انتظام",
+  "notices-admin": "نوٹسز کا انتظام",
+  "activities-admin": "سرگرمیوں کا انتظام",
+  "achievements-admin": "حوصلہ افزائی کا انتظام",
+  "contact-admin": "رابطہ معلومات",
+};
+
+/* ============================================================
+   CONTACT INFORMATION (Phase 1 — Contact Information Management)
+   ------------------------------------------------------------
+   Stored as its own array under contactInfo in the SAME existing
+   kwo/data Firestore document — merged in via persist({contactInfo})
+   just like every other section, so the document structure isn't
+   restructured. Each entry: { id, type: 'phone'|'email', value,
+   label, status: 'active'|'archived' }. "Remove" here is a real
+   delete (not archive) since these are simple contact entries, not
+   financial/audit records — matches the plain "add/edit/remove"
+   requirement. Existing siteConfig.footer.contactLabel/
+   contactPlaceholder fields are left completely untouched.
+   ============================================================ */
+const DEFAULT_CONTACT_INFO = [];
+
+/* ============================================================
    CORE FUND / DONATION / ARREARS LOGIC
    ------------------------------------------------------------
    Pure function, no hard-coded amounts — always driven by the
@@ -276,14 +317,14 @@ export default function App() {
   const [notices, setNotices] = useState(DEFAULT_NOTICES);
   const [activities, setActivities] = useState(DEFAULT_ACTIVITIES);
   const [achievements, setAchievements] = useState(DEFAULT_ACHIEVEMENTS);
+  const [contactInfo, setContactInfo] = useState(DEFAULT_CONTACT_INFO);
 
   /* ---- Firebase Authentication (Admin Panel gate) ----
      `authUser` is null until Firebase reports the real state (either
      "signed in" or "signed out") — `authLoading` distinguishes "we
      don't know yet" from "definitely signed out", so a page refresh
      doesn't briefly flash the login screen for an already-logged-in
-     Super Admin. No role/permission system beyond "logged in or not"
-     yet — Limited Admin roles are explicitly a later step. */
+     Super Admin. */
   const [authUser, setAuthUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
 
@@ -294,6 +335,53 @@ export default function App() {
     });
     return unsubscribe;
   }, []);
+
+  /* ---- Limited Admin roles ----
+     Role assignment lives in Firestore: adminRoles/{uid} → { email,
+     role: 'super_admin' | 'limited_admin', sections: [...], active }.
+     If NO role doc exists for a signed-in user, they are treated as
+     'super_admin' with access to everything — this preserves the
+     existing single-admin account's access exactly as it was before
+     this feature existed, so nobody gets locked out. A role doc is
+     only needed when you deliberately want to LIMIT someone.
+
+     IMPORTANT HONESTY NOTE: this only controls what the UI shows.
+     The actual Firestore security rule for the "kwo/data" document
+     currently just checks "is this user signed in at all" — it does
+     not yet enforce per-section write permissions at the database
+     level (that would require splitting kwo/data into separate
+     documents/collections with matching rules, which hasn't been
+     done). So a Limited Admin who is technically comfortable enough
+     to call the Firestore API directly could still write outside
+     their assigned sections. This is safe for keeping normal admins
+     within their assigned areas of the app, but is not yet a hard
+     security boundary. */
+  const [adminRole, setAdminRole] = useState(null);
+  const [roleLoading, setRoleLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadRole() {
+      if (!authUser) {
+        setAdminRole(null);
+        setRoleLoading(false);
+        return;
+      }
+      setRoleLoading(true);
+      try {
+        const snap = await getDoc(doc(db, "adminRoles", authUser.uid));
+        if (snap.exists()) {
+          setAdminRole(snap.data());
+        } else {
+          setAdminRole({ role: "super_admin", sections: SECTION_KEYS, active: true });
+        }
+      } catch (err) {
+        console.error("Failed to load admin role:", err);
+        setAdminRole({ role: "super_admin", sections: SECTION_KEYS, active: true });
+      }
+      setRoleLoading(false);
+    }
+    loadRole();
+  }, [authUser]);
 
   /* ---- Firestore persistence ----
      Everything lives in ONE document: kwo/data. That keeps every
@@ -324,6 +412,7 @@ export default function App() {
           if (d.notices) setNotices(d.notices);
           if (d.activities) setActivities(d.activities);
           if (d.achievements) setAchievements(d.achievements);
+          if (d.contactInfo) setContactInfo(d.contactInfo);
         }
       } catch (err) {
         console.error("Firestore load failed:", err);
@@ -353,12 +442,18 @@ export default function App() {
   }
 
   const ADMIN_ONLY_VIEWS = new Set([
-    "admin", "members", "funds", "expenses", "summary", "reports-admin",
-    "dastoor-admin", "notices-admin", "activities-admin", "achievements-admin",
+    "admin", "admin-users", "members", "funds", "expenses", "summary", "reports-admin",
+    "dastoor-admin", "notices-admin", "activities-admin", "achievements-admin", "contact-admin",
   ]);
+  const VIEW_TO_SECTION = {
+    members: "members", funds: "funds", expenses: "expenses", summary: "summary",
+    "reports-admin": "reports-admin", "dastoor-admin": "dastoor-admin",
+    "notices-admin": "notices-admin", "activities-admin": "activities-admin",
+    "achievements-admin": "achievements-admin", "contact-admin": "contact-admin",
+  };
 
   if (ADMIN_ONLY_VIEWS.has(view)) {
-    if (authLoading) {
+    if (authLoading || roleLoading) {
       return <AuthLoadingScreen theme={siteConfig.theme} />;
     }
     if (!authUser) {
@@ -370,9 +465,43 @@ export default function App() {
         />
       );
     }
+    const isSuperAdmin = !adminRole || adminRole.role === "super_admin";
+    const isActive = !adminRole || adminRole.active !== false;
+    if (!isActive) {
+      return (
+        <AccessDeniedScreen
+          theme={siteConfig.theme}
+          message="آپ کے اکاؤنٹ کی رسائی فی الحال معطل ہے۔ Super Admin سے رابطہ کریں۔"
+          onBack={() => setView("home")}
+          onLogout={() => { signOut(auth); setView("home"); }}
+        />
+      );
+    }
+    if (view === "admin-users" && !isSuperAdmin) {
+      return (
+        <AccessDeniedScreen
+          theme={siteConfig.theme}
+          message="یہ حصہ صرف Super Admin کے لیے ہے۔"
+          onBack={() => setView("admin")}
+          onLogout={() => { signOut(auth); setView("home"); }}
+        />
+      );
+    }
+    const neededSection = VIEW_TO_SECTION[view];
+    if (neededSection && !isSuperAdmin && !(adminRole.sections || []).includes(neededSection)) {
+      return (
+        <AccessDeniedScreen
+          theme={siteConfig.theme}
+          message="اس حصے تک آپ کی رسائی نہیں ہے۔"
+          onBack={() => setView("admin")}
+          onLogout={() => { signOut(auth); setView("home"); }}
+        />
+      );
+    }
   }
 
   if (view === "admin") {
+    const isSuperAdmin = !adminRole || adminRole.role === "super_admin";
     return (
       <AdminPanel
         siteConfig={siteConfig}
@@ -381,6 +510,9 @@ export default function App() {
         onApply={applyChanges}
         onBack={() => setView("home")}
         onLogout={() => { signOut(auth); setView("home"); }}
+        isSuperAdmin={isSuperAdmin}
+        allowedSections={adminRole ? adminRole.sections || [] : SECTION_KEYS}
+        onOpenAdminUsers={() => setView("admin-users")}
         onOpenMembers={() => setView("members")}
         onOpenFunds={() => setView("funds")}
         onOpenExpenses={() => setView("expenses")}
@@ -390,6 +522,27 @@ export default function App() {
         onOpenNotices={() => setView("notices-admin")}
         onOpenActivities={() => setView("activities-admin")}
         onOpenAchievements={() => setView("achievements-admin")}
+        onOpenContact={() => setView("contact-admin")}
+      />
+    );
+  }
+
+  if (view === "admin-users") {
+    return (
+      <AdminUsersManagement
+        theme={siteConfig.theme}
+        onBack={() => setView("admin")}
+      />
+    );
+  }
+
+  if (view === "contact-admin") {
+    return (
+      <ContactManagement
+        theme={siteConfig.theme}
+        contactInfo={contactInfo}
+        onApply={(nextContactInfo) => { setContactInfo(nextContactInfo); persist({ contactInfo: nextContactInfo }); }}
+        onBack={() => setView("admin")}
       />
     );
   }
@@ -569,6 +722,7 @@ export default function App() {
       cardRegistry={cardRegistry}
       fundConfig={fundConfig}
       members={members}
+      contactInfo={contactInfo}
       onOpenAdmin={() => setView("admin")}
       onOpenCard={(cardId) => setView(cardId)}
     />
@@ -579,7 +733,7 @@ export default function App() {
    PUBLIC HOME PAGE (Phase 1A design, unchanged — now reads its
    data from props instead of module-level constants)
    ============================================================ */
-function HomePage({ siteConfig, cardRegistry, fundConfig, members, onOpenAdmin, onOpenCard }) {
+function HomePage({ siteConfig, cardRegistry, fundConfig, members, contactInfo, onOpenAdmin, onOpenCard }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { theme } = siteConfig;
 
@@ -934,6 +1088,42 @@ function HomePage({ siteConfig, cardRegistry, fundConfig, members, onOpenAdmin, 
           <p style={{ margin: 0, fontSize: "0.88rem", color: "#C9C6B6" }}>
             {siteConfig.footer.contactLabel}: {siteConfig.footer.contactPlaceholder}
           </p>
+
+          {contactInfo && contactInfo.filter((c) => c.status !== "archived").length > 0 && (
+            <div style={{ marginTop: 6, paddingTop: 14, borderTop: "1px solid rgba(239,235,182,0.15)" }}>
+              <h5 className="kw-heading" style={{ margin: "0 0 10px", fontSize: "1rem", color: "#EFEBDD" }}>
+                ہم سے رابطہ کریں
+              </h5>
+              <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 10 }}>
+                {contactInfo
+                  .filter((c) => c.status !== "archived")
+                  .map((c) => (
+                    <a
+                      key={c.id}
+                      href={c.type === "phone" ? `tel:${c.value}` : `mailto:${c.value}`}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        background: "rgba(239,235,182,0.08)",
+                        border: "1px solid rgba(239,235,182,0.18)",
+                        borderRadius: 999,
+                        padding: "7px 14px",
+                        fontSize: "0.82rem",
+                        color: "#EFEBDD",
+                        textDecoration: "none",
+                        direction: "ltr",
+                      }}
+                    >
+                      {c.type === "phone" ? <Phone size={13} /> : <Mail size={13} />}
+                      <span style={{ direction: "ltr" }}>{c.value}</span>
+                      {c.label && <span style={{ color: "#B7CFC3", fontSize: "0.72rem" }}>({c.label})</span>}
+                    </a>
+                  ))}
+              </div>
+            </div>
+          )}
+
           <p style={{ margin: "6px 0 0", fontSize: "0.78rem", color: "#8FA69B" }}>
             © {new Date().getFullYear()} {siteConfig.orgNameUrdu} — {siteConfig.footer.copyrightLine}
           </p>
@@ -988,11 +1178,28 @@ function HomePage({ siteConfig, cardRegistry, fundConfig, members, onOpenAdmin, 
    "persistence" means in this phase — it resets on page reload,
    exactly as expected before a database is connected.
    ============================================================ */
-function AdminPanel({ siteConfig, cardRegistry, fundConfig, onApply, onBack, onLogout, onOpenMembers, onOpenFunds, onOpenExpenses, onOpenSummary, onOpenReports, onOpenDastoor, onOpenNotices, onOpenActivities, onOpenAchievements }) {
+function AdminPanel({ siteConfig, cardRegistry, fundConfig, onApply, onBack, onLogout, isSuperAdmin, allowedSections, onOpenAdminUsers, onOpenMembers, onOpenFunds, onOpenExpenses, onOpenSummary, onOpenReports, onOpenDastoor, onOpenNotices, onOpenActivities, onOpenAchievements, onOpenContact }) {
   const [draftSite, setDraftSite] = useState(siteConfig);
   const [draftCards, setDraftCards] = useState(cardRegistry);
   const [draftFund, setDraftFund] = useState(fundConfig);
   const [savedFlash, setSavedFlash] = useState(false);
+
+  function canSee(section) {
+    return isSuperAdmin || allowedSections.includes(section);
+  }
+
+  const NAV_BUTTONS = [
+    { section: "members", icon: Users, label: "ممبران کا انتظام", onClick: onOpenMembers },
+    { section: "funds", icon: Wallet, label: "فنڈز کا انتظام", onClick: onOpenFunds },
+    { section: "expenses", icon: Receipt, label: "اخراجات کا انتظام", onClick: onOpenExpenses },
+    { section: "reports-admin", icon: ClipboardList, label: "رپورٹس", onClick: onOpenReports },
+    { section: "summary", icon: FileBarChart, label: "مالی خلاصہ", onClick: onOpenSummary },
+    { section: "dastoor-admin", icon: BookOpenText, label: "دستور کا انتظام", onClick: onOpenDastoor },
+    { section: "notices-admin", icon: Bell, label: "نوٹسز کا انتظام", onClick: onOpenNotices },
+    { section: "activities-admin", icon: Activity, label: "سرگرمیوں کا انتظام", onClick: onOpenActivities },
+    { section: "achievements-admin", icon: Award, label: "حوصلہ افزائی کا انتظام", onClick: onOpenAchievements },
+    { section: "contact-admin", icon: Phone, label: "رابطہ معلومات", onClick: onOpenContact },
+  ];
 
   const theme = draftSite.theme;
   const sortedCards = [...draftCards].sort((a, b) => a.order - b.order);
@@ -1097,177 +1304,52 @@ function AdminPanel({ siteConfig, cardRegistry, fundConfig, onApply, onBack, onL
             <h1 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.15rem", margin: 0 }}>سپر ایڈمن پینل</h1>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <button
-              onClick={onOpenAchievements}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "rgba(251,249,244,0.14)",
-                border: "1px solid rgba(251,249,244,0.35)",
-                color: "#FBF9F4",
-                borderRadius: 999,
-                padding: "7px 14px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-                fontFamily: "'Noto Naskh Arabic', serif",
-              }}
-            >
-              <Award size={15} />
-              حوصلہ افزائی کا انتظام
-            </button>
-            <button
-              onClick={onOpenActivities}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "rgba(251,249,244,0.14)",
-                border: "1px solid rgba(251,249,244,0.35)",
-                color: "#FBF9F4",
-                borderRadius: 999,
-                padding: "7px 14px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-                fontFamily: "'Noto Naskh Arabic', serif",
-              }}
-            >
-              <Activity size={15} />
-              سرگرمیوں کا انتظام
-            </button>
-            <button
-              onClick={onOpenNotices}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "rgba(251,249,244,0.14)",
-                border: "1px solid rgba(251,249,244,0.35)",
-                color: "#FBF9F4",
-                borderRadius: 999,
-                padding: "7px 14px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-                fontFamily: "'Noto Naskh Arabic', serif",
-              }}
-            >
-              <Bell size={15} />
-              نوٹسز کا انتظام
-            </button>
-            <button
-              onClick={onOpenDastoor}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "rgba(251,249,244,0.14)",
-                border: "1px solid rgba(251,249,244,0.35)",
-                color: "#FBF9F4",
-                borderRadius: 999,
-                padding: "7px 14px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-                fontFamily: "'Noto Naskh Arabic', serif",
-              }}
-            >
-              <BookOpenText size={15} />
-              دستور کا انتظام
-            </button>
-            <button
-              onClick={onOpenSummary}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "rgba(251,249,244,0.14)",
-                border: "1px solid rgba(251,249,244,0.35)",
-                color: "#FBF9F4",
-                borderRadius: 999,
-                padding: "7px 14px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-                fontFamily: "'Noto Naskh Arabic', serif",
-              }}
-            >
-              <FileBarChart size={15} />
-              مالی خلاصہ
-            </button>
-            <button
-              onClick={onOpenReports}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "rgba(251,249,244,0.14)",
-                border: "1px solid rgba(251,249,244,0.35)",
-                color: "#FBF9F4",
-                borderRadius: 999,
-                padding: "7px 14px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-                fontFamily: "'Noto Naskh Arabic', serif",
-              }}
-            >
-              <ClipboardList size={15} />
-              رپورٹس
-            </button>
-            <button
-              onClick={onOpenExpenses}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "rgba(251,249,244,0.14)",
-                border: "1px solid rgba(251,249,244,0.35)",
-                color: "#FBF9F4",
-                borderRadius: 999,
-                padding: "7px 14px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-                fontFamily: "'Noto Naskh Arabic', serif",
-              }}
-            >
-              <Receipt size={15} />
-              اخراجات کا انتظام
-            </button>
-            <button
-              onClick={onOpenFunds}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "rgba(251,249,244,0.14)",
-                border: "1px solid rgba(251,249,244,0.35)",
-                color: "#FBF9F4",
-                borderRadius: 999,
-                padding: "7px 14px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-                fontFamily: "'Noto Naskh Arabic', serif",
-              }}
-            >
-              <Wallet size={15} />
-              فنڈز کا انتظام
-            </button>
-            <button
-              onClick={onOpenMembers}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "rgba(251,249,244,0.14)",
-                border: "1px solid rgba(251,249,244,0.35)",
-                color: "#FBF9F4",
-                borderRadius: 999,
-                padding: "7px 14px",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-                fontFamily: "'Noto Naskh Arabic', serif",
-              }}
-            >
-              <Users size={15} />
-              ممبران کا انتظام
-            </button>
+            {NAV_BUTTONS.filter((b) => canSee(b.section)).map((b) => {
+              const Icon = b.icon;
+              return (
+                <button
+                  key={b.section}
+                  onClick={b.onClick}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    background: "rgba(251,249,244,0.14)",
+                    border: "1px solid rgba(251,249,244,0.35)",
+                    color: "#FBF9F4",
+                    borderRadius: 999,
+                    padding: "7px 14px",
+                    fontSize: "0.85rem",
+                    cursor: "pointer",
+                    fontFamily: "'Noto Naskh Arabic', serif",
+                  }}
+                >
+                  <Icon size={15} />
+                  {b.label}
+                </button>
+              );
+            })}
+            {isSuperAdmin && (
+              <button
+                onClick={onOpenAdminUsers}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  background: "rgba(251,249,244,0.14)",
+                  border: "1px solid rgba(251,249,244,0.35)",
+                  color: "#FBF9F4",
+                  borderRadius: 999,
+                  padding: "7px 14px",
+                  fontSize: "0.85rem",
+                  cursor: "pointer",
+                  fontFamily: "'Noto Naskh Arabic', serif",
+                }}
+              >
+                <ShieldCheck size={15} />
+                Admin Users
+              </button>
+            )}
             <button
               onClick={onBack}
               style={{
@@ -1311,6 +1393,15 @@ function AdminPanel({ siteConfig, cardRegistry, fundConfig, onApply, onBack, onL
       </header>
 
       <main style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px 120px" }}>
+        {!isSuperAdmin && !canSee("settings") && (
+          <section style={{ ...sectionStyle, background: "rgba(184,134,43,0.08)", border: `1px solid ${theme.accent}` }}>
+            <p style={{ margin: 0, fontSize: "0.85rem", color: theme.textStrong }}>
+              آپ کو محدود رسائی (Limited Admin) دی گئی ہے۔ اوپر صرف وہی حصے نظر آتے ہیں جن کی اجازت آپ کو Super Admin نے دی ہے۔
+            </p>
+          </section>
+        )}
+        {canSee("settings") && (
+        <>
         {/* 1. Organization Branding */}
         <section style={sectionStyle}>
           <h2 style={sectionTitleStyle}>تنظیم کی برانڈنگ</h2>
@@ -1445,9 +1536,12 @@ function AdminPanel({ siteConfig, cardRegistry, fundConfig, onApply, onBack, onL
             یہ قدر Home Page پر "فنڈز" Card میں خودکار طور پر ظاہر ہوگی۔
           </p>
         </section>
+        </>
+        )}
       </main>
 
-      {/* Sticky Save bar */}
+      {/* Sticky Save bar — only relevant when the settings sections above are visible */}
+      {canSee("settings") && (
       <div
         style={{
           position: "fixed",
@@ -1483,6 +1577,7 @@ function AdminPanel({ siteConfig, cardRegistry, fundConfig, onApply, onBack, onL
           تبدیلیاں محفوظ کریں
         </button>
       </div>
+      )}
     </div>
   );
 }
@@ -1744,7 +1839,7 @@ function MembersManagement({ theme, members, onApply, onBack }) {
 
           {showAddForm && (
             <div style={{ borderTop: `1px dashed ${theme.border}`, paddingTop: 14 }}>
-              <MemberFormFields form={addForm} setForm={setAddForm} />
+              {MemberFormFields({ form: addForm, setForm: setAddForm })}
               <button
                 onClick={addMember}
                 disabled={!addForm.name.trim()}
@@ -1766,7 +1861,7 @@ function MembersManagement({ theme, members, onApply, onBack }) {
               <div key={member.id} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, padding: 12, background: "#FDFCF9" }}>
                 {editingId === member.id ? (
                   <div>
-                    <MemberFormFields form={editForm} setForm={setEditForm} />
+                    {MemberFormFields({ form: editForm, setForm: setEditForm })}
                     <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                       <button onClick={() => saveEdit(member.id)} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: "0.8rem", cursor: "pointer" }}>
                         محفوظ کریں
@@ -2473,7 +2568,7 @@ function ExpensesManagement({ theme, expenses, currency, onApply, onBack }) {
 
           {showAddForm && (
             <div style={{ borderTop: `1px dashed ${theme.border}`, paddingTop: 14 }}>
-              <MemberFormLikeFields f={form} setF={setForm} />
+              {MemberFormLikeFields({ f: form, setF: setForm })}
               <button
                 onClick={addExpense}
                 disabled={!form.title.trim() || !form.amount}
@@ -2498,7 +2593,7 @@ function ExpensesManagement({ theme, expenses, currency, onApply, onBack }) {
               <div key={expense.id} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, padding: 12, background: "#FDFCF9" }}>
                 {editingId === expense.id ? (
                   <div>
-                    <MemberFormLikeFields f={editForm} setF={setEditForm} />
+                    {MemberFormLikeFields({ f: editForm, setF: setEditForm })}
                     <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                       <button onClick={() => saveEdit(expense.id)} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: "0.8rem", cursor: "pointer" }}>
                         محفوظ کریں
@@ -2874,7 +2969,19 @@ function DastoorPage({ theme, card, chapters, clauses, onBack }) {
                   <h3 style={{ fontSize: "0.98rem", color: theme.textStrong, margin: "0 0 4px" }}>
                     دفعہ {clause.number}: {clause.title}
                   </h3>
-                  <p style={{ fontSize: "0.88rem", color: theme.textMuted, lineHeight: 2, margin: 0 }}>{clause.text}</p>
+                  <p
+                    style={{
+                      fontSize: "0.88rem",
+                      color: theme.textMuted,
+                      lineHeight: 2,
+                      margin: 0,
+                      whiteSpace: "pre-line",
+                      overflowWrap: "break-word",
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    {clause.text}
+                  </p>
                 </div>
               ))
             )}
@@ -3598,7 +3705,7 @@ function NoticesManagement({ theme, notices, members, dastoorChapters, dastoorCl
 
           {showAddForm && (
             <div style={{ borderTop: `1px dashed ${theme.border}`, paddingTop: 14 }}>
-              <NoticeFormFields f={form} setF={setForm} />
+              {NoticeFormFields({ f: form, setF: setForm })}
               <button
                 onClick={addNotice}
                 disabled={!form.title.trim() || !form.text.trim()}
@@ -3633,7 +3740,7 @@ function NoticesManagement({ theme, notices, members, dastoorChapters, dastoorCl
                 <div key={notice.id} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, padding: 12, background: "#FDFCF9" }}>
                   {editingId === notice.id ? (
                     <div>
-                      <NoticeFormFields f={editForm} setF={setEditForm} />
+                      {NoticeFormFields({ f: editForm, setF: setEditForm })}
                       <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                         <button onClick={() => saveEdit(notice.id)} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: "0.8rem", cursor: "pointer" }}>
                           محفوظ کریں
@@ -4000,7 +4107,7 @@ function ActivitiesManagement({ theme, activities, onApply, onBack }) {
 
           {showAddForm && (
             <div style={{ borderTop: `1px dashed ${theme.border}`, paddingTop: 14 }}>
-              <ActivityFormFields f={form} setF={setForm} />
+              {ActivityFormFields({ f: form, setF: setForm })}
               <button
                 onClick={addActivity}
                 disabled={!form.title.trim() || !form.description.trim()}
@@ -4025,7 +4132,7 @@ function ActivitiesManagement({ theme, activities, onApply, onBack }) {
               <div key={activity.id} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, padding: 12, background: "#FDFCF9" }}>
                 {editingId === activity.id ? (
                   <div>
-                    <ActivityFormFields f={editForm} setF={setEditForm} />
+                    {ActivityFormFields({ f: editForm, setF: setEditForm })}
                     <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                       <button onClick={() => saveEdit(activity.id)} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: "0.8rem", cursor: "pointer" }}>
                         محفوظ کریں
@@ -4440,7 +4547,7 @@ function AchievementsManagement({ theme, achievements, members, payments, onAppl
 
           {showAddForm && (
             <div style={{ borderTop: `1px dashed ${theme.border}`, paddingTop: 14 }}>
-              <AchievementFormFields f={form} setF={setForm} />
+              {AchievementFormFields({ f: form, setF: setForm })}
               <button
                 onClick={addAchievement}
                 disabled={!form.memberId || !form.title.trim()}
@@ -4465,7 +4572,7 @@ function AchievementsManagement({ theme, achievements, members, payments, onAppl
               <div key={a.id} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, padding: 12, background: "#FDFCF9" }}>
                 {editingId === a.id ? (
                   <div>
-                    <AchievementFormFields f={editForm} setF={setEditForm} />
+                    {AchievementFormFields({ f: editForm, setF: setEditForm })}
                     <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                       <button onClick={() => saveEdit(a.id)} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: "0.8rem", cursor: "pointer" }}>
                         محفوظ کریں
@@ -5157,7 +5264,7 @@ function ReportsManagement({ theme, orgName, orgNameEnglish, shortName, members,
           </div>
         </section>
 
-        <DateFilterBar />
+        {DateFilterBar()}
 
         {activeTab === "members" && renderMembersReport()}
         {activeTab === "funds" && renderFundsReport()}
@@ -5363,6 +5470,509 @@ function LoginScreen({ theme, orgNameUrdu, onBackToSite }) {
           ویب سائٹ پر واپس جائیں
         </button>
       </form>
+    </div>
+  );
+}
+
+/* ============================================================
+   ACCESS DENIED SCREEN
+   ============================================================ */
+function AccessDeniedScreen({ theme, message, onBack, onLogout }) {
+  return (
+    <div
+      dir="rtl"
+      lang="ur"
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 18,
+        background: `linear-gradient(180deg, ${theme.background} 0%, ${theme.backgroundAlt} 100%)`,
+        fontFamily: "'Noto Naskh Arabic', serif",
+        color: theme.textStrong,
+      }}
+    >
+      <div style={{ maxWidth: 380, textAlign: "center", background: "#FFFFFF", border: `1px solid ${theme.border}`, borderRadius: 18, padding: "28px 24px", boxShadow: "0 12px 28px rgba(11,79,63,0.12)" }}>
+        <div style={{ width: 48, height: 48, borderRadius: 12, margin: "0 auto 14px", background: "rgba(184,134,43,0.14)", display: "flex", alignItems: "center", justifyContent: "center", color: theme.accent }}>
+          <ShieldCheck size={22} />
+        </div>
+        <h1 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.1rem", color: theme.primary, margin: "0 0 8px" }}>رسائی محدود ہے</h1>
+        <p style={{ fontSize: "0.85rem", color: theme.textMuted, margin: "0 0 18px" }}>{message}</p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+          <button onClick={onBack} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}>
+            واپس جائیں
+          </button>
+          <button onClick={onLogout} style={{ background: "#fff", border: `1px solid ${theme.border}`, color: theme.textMuted, borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}>
+            لاگ آؤٹ
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ADMIN USERS MANAGEMENT (Super Admin only)
+   ------------------------------------------------------------
+   Manages Firestore adminRoles/{uid} docs. Because this is a
+   client-only app (no Cloud Functions / Admin SDK), a new Limited
+   Admin's Firebase Auth account still has to be created manually
+   in the Firebase Console (Authentication → Users) — this screen
+   only assigns that account's PERMISSIONS once you paste its UID.
+   Never deletes a role doc — "Remove access" just sets active:false,
+   so the assignment history/audit trail isn't lost.
+   ============================================================ */
+function emptyAdminUserForm() {
+  return { uid: "", email: "", sections: [] };
+}
+
+function AdminUsersManagement({ theme, onBack }) {
+  const [roles, setRoles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [form, setForm] = useState(emptyAdminUserForm());
+  const [saving, setSaving] = useState(false);
+  const [flash, setFlash] = useState("");
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const snap = await getDocs(collection(db, "adminRoles"));
+        setRoles(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      } catch (err) {
+        console.error("Failed to load admin users:", err);
+      }
+      setLoading(false);
+    }
+    load();
+  }, []);
+
+  function toggleSection(setF, key) {
+    setF((prev) => {
+      const has = prev.sections.includes(key);
+      return { ...prev, sections: has ? prev.sections.filter((s) => s !== key) : [...prev.sections, key] };
+    });
+  }
+
+  async function addLimitedAdmin() {
+    if (!form.uid.trim()) return;
+    setSaving(true);
+    try {
+      const roleData = { email: form.email.trim(), role: "limited_admin", sections: form.sections, active: true };
+      await setDoc(doc(db, "adminRoles", form.uid.trim()), roleData);
+      setRoles((prev) => [...prev.filter((r) => r.id !== form.uid.trim()), { id: form.uid.trim(), ...roleData }]);
+      setForm(emptyAdminUserForm());
+      setShowAddForm(false);
+      setFlash("Admin شامل ہو گیا۔");
+    } catch (err) {
+      console.error("Failed to save admin role:", err);
+      setFlash("محفوظ کرنے میں مسئلہ ہوا۔");
+    }
+    setSaving(false);
+    setTimeout(() => setFlash(""), 3000);
+  }
+
+  async function updateSections(uid, sections) {
+    try {
+      await setDoc(doc(db, "adminRoles", uid), { sections }, { merge: true });
+      setRoles((prev) => prev.map((r) => (r.id === uid ? { ...r, sections } : r)));
+    } catch (err) {
+      console.error("Failed to update sections:", err);
+    }
+  }
+
+  async function setActive(uid, active) {
+    try {
+      await setDoc(doc(db, "adminRoles", uid), { active }, { merge: true });
+      setRoles((prev) => prev.map((r) => (r.id === uid ? { ...r, active } : r)));
+    } catch (err) {
+      console.error("Failed to update status:", err);
+    }
+  }
+
+  const sectionStyle = {
+    background: "#FFFFFF",
+    border: `1px solid ${theme.border}`,
+    borderRadius: 16,
+    padding: "16px",
+    marginBottom: 16,
+    boxShadow: "0 1px 2px rgba(31,42,36,0.06)",
+  };
+  const labelStyle = { display: "block", fontSize: "0.78rem", color: theme.textMuted, marginBottom: 4 };
+  const inputStyle = {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "9px 10px",
+    borderRadius: 9,
+    border: `1px solid ${theme.border}`,
+    fontFamily: "'Noto Naskh Arabic', serif",
+    fontSize: "0.9rem",
+    color: theme.textStrong,
+    background: "#FDFCF9",
+    marginBottom: 0,
+    direction: "ltr",
+    textAlign: "left",
+  };
+
+  function SectionCheckboxes({ selected, onToggle }) {
+    return (
+      <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+        {SECTION_KEYS.map((key) => (
+          <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.8rem", cursor: "pointer" }}>
+            <input type="checkbox" checked={selected.includes(key)} onChange={() => onToggle(key)} />
+            {SECTION_LABELS_UR[key]}
+          </label>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div dir="rtl" lang="ur" style={{ minHeight: "100vh", background: `linear-gradient(180deg, ${theme.background} 0%, ${theme.backgroundAlt} 100%)`, fontFamily: "'Noto Naskh Arabic', serif", color: theme.textStrong }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400..700&family=Noto+Naskh+Arabic:wght@400..700&display=swap');`}</style>
+
+      <header style={{ background: `linear-gradient(135deg, ${theme.primary} 0%, ${theme.primaryDark} 100%)`, color: "#FBF9F4", position: "sticky", top: 0, zIndex: 20, padding: "14px 18px" }}>
+        <div style={{ maxWidth: 900, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <ShieldCheck size={20} />
+            <h1 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.15rem", margin: 0 }}>Admin Users</h1>
+          </div>
+          <button
+            onClick={onBack}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(251,249,244,0.14)", border: "1px solid rgba(251,249,244,0.35)", color: "#FBF9F4", borderRadius: 999, padding: "7px 14px", fontSize: "0.85rem", cursor: "pointer", fontFamily: "'Noto Naskh Arabic', serif" }}
+          >
+            <ArrowRight size={15} />
+            ایڈمن پینل
+          </button>
+        </div>
+      </header>
+
+      <main style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px 60px" }}>
+        <section style={sectionStyle}>
+          <p style={{ fontSize: "0.8rem", color: theme.textMuted, margin: "0 0 6px" }}>
+            نیا Limited Admin شامل کرنے کے لیے: پہلے Firebase Console → Authentication → Users میں اس شخص کا email/password والا اکاؤنٹ بنائیں، وہاں سے اس کا UID کاپی کریں، پھر نیچے وہ UID اور اجازت شدہ حصے یہاں محفوظ کریں۔
+          </p>
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <h2 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.05rem", color: theme.primary, margin: 0 }}>نیا Limited Admin</h2>
+            <button
+              onClick={() => setShowAddForm((v) => !v)}
+              style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}
+            >
+              {showAddForm ? "بند کریں" : "+ شامل کریں"}
+            </button>
+          </div>
+
+          {showAddForm && (
+            <div style={{ marginTop: 14, borderTop: `1px dashed ${theme.border}`, paddingTop: 14 }}>
+              <label style={labelStyle}>Firebase UID</label>
+              <input style={{ ...inputStyle, marginBottom: 10 }} value={form.uid} onChange={(e) => setForm((p) => ({ ...p, uid: e.target.value }))} placeholder="Firebase Console سے کاپی کریں" />
+              <label style={labelStyle}>Email (صرف شناخت کے لیے)</label>
+              <input style={{ ...inputStyle, marginBottom: 10 }} value={form.email} onChange={(e) => setForm((p) => ({ ...p, email: e.target.value }))} />
+              <label style={labelStyle}>اجازت شدہ حصے</label>
+              {SectionCheckboxes({ selected: form.sections, onToggle: (key) => toggleSection(setForm, key) })}
+              <button
+                onClick={addLimitedAdmin}
+                disabled={!form.uid.trim() || saving}
+                style={{ marginTop: 12, background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 10, padding: "9px 18px", fontSize: "0.85rem", cursor: "pointer", opacity: form.uid.trim() ? 1 : 0.5 }}
+              >
+                {saving ? "محفوظ ہو رہا ہے..." : "محفوظ کریں"}
+              </button>
+              {flash && <span style={{ marginRight: 10, fontSize: "0.8rem", color: theme.primary }}>{flash}</span>}
+            </div>
+          )}
+        </section>
+
+        <section style={sectionStyle}>
+          <h2 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.05rem", color: theme.primary, margin: "0 0 12px" }}>موجودہ Admins</h2>
+          {loading && <p style={{ fontSize: "0.85rem", color: theme.textMuted }}>لوڈ ہو رہا ہے...</p>}
+          {!loading && roles.length === 0 && <p style={{ fontSize: "0.85rem", color: theme.textMuted }}>ابھی کوئی Limited Admin شامل نہیں کیا گیا۔</p>}
+          <div style={{ display: "grid", gap: 10 }}>
+            {roles.map((r) => (
+              <div key={r.id} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, padding: 12, background: "#FDFCF9" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+                  <div>
+                    <strong>{r.email || "(email محفوظ نہیں)"}</strong>
+                    <div style={{ fontSize: "0.7rem", color: theme.textMuted, direction: "ltr", textAlign: "left" }}>{r.id}</div>
+                  </div>
+                  <span
+                    style={{
+                      borderRadius: 999, padding: "3px 10px", fontSize: "0.7rem",
+                      background: r.active === false ? "rgba(178,52,52,0.12)" : "rgba(11,79,63,0.1)",
+                      color: r.active === false ? "#B23434" : theme.primary,
+                    }}
+                  >
+                    {r.active === false ? "معطل" : "فعال"}
+                  </span>
+                </div>
+                {SectionCheckboxes({ selected: r.sections || [], onToggle: (key) => {
+                  const has = (r.sections || []).includes(key);
+                  const next = has ? (r.sections || []).filter((s) => s !== key) : [...(r.sections || []), key];
+                  updateSections(r.id, next);
+                } })}
+                <div style={{ marginTop: 10 }}>
+                  {r.active === false ? (
+                    <button onClick={() => setActive(r.id, true)} style={{ border: "none", background: "rgba(11,79,63,0.1)", color: theme.primary, borderRadius: 999, padding: "5px 12px", fontSize: "0.72rem", cursor: "pointer" }}>
+                      رسائی بحال کریں
+                    </button>
+                  ) : (
+                    <button onClick={() => setActive(r.id, false)} style={{ border: "none", background: "rgba(178,52,52,0.1)", color: "#B23434", borderRadius: 999, padding: "5px 12px", fontSize: "0.72rem", cursor: "pointer" }}>
+                      رسائی معطل کریں
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}
+
+/* ============================================================
+   CONTACT INFORMATION MANAGEMENT (Phase 1)
+   ------------------------------------------------------------
+   Same no-database-of-its-own, draft-then-Save pattern as every
+   other admin screen — draftContacts is local until "محفوظ کریں"
+   is pressed, then lifted up via onApply(draftContacts), which
+   App() merges into the SAME existing kwo/data document under
+   contactInfo (persist({ contactInfo }) — see App()). Nothing
+   about the existing document structure changes.
+   ============================================================ */
+function emptyContactForm() {
+  return { type: "phone", value: "", label: "" };
+}
+
+function ContactManagement({ theme, contactInfo, onApply, onBack }) {
+  const [draftContacts, setDraftContacts] = useState(contactInfo);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [form, setForm] = useState(emptyContactForm());
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(emptyContactForm());
+
+  function handleSave() {
+    onApply(draftContacts);
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 2500);
+  }
+
+  function addContact() {
+    if (!form.value.trim()) return;
+    const record = {
+      id: `contact-${Date.now()}`,
+      type: form.type,
+      value: form.value.trim(),
+      label: form.label.trim(),
+      status: "active",
+    };
+    setDraftContacts((prev) => [...prev, record]);
+    setForm(emptyContactForm());
+    setShowAddForm(false);
+  }
+
+  function startEdit(c) {
+    setEditingId(c.id);
+    setEditForm({ type: c.type, value: c.value, label: c.label });
+  }
+
+  function saveEdit(id) {
+    setDraftContacts((prev) =>
+      prev.map((c) =>
+        c.id === id
+          ? { ...c, type: editForm.type, value: editForm.value.trim() || c.value, label: editForm.label.trim() }
+          : c
+      )
+    );
+    setEditingId(null);
+  }
+
+  function toggleStatus(id) {
+    setDraftContacts((prev) => prev.map((c) => (c.id === id ? { ...c, status: c.status === "active" ? "archived" : "active" } : c)));
+  }
+
+  function removeContact(id) {
+    setDraftContacts((prev) => prev.filter((c) => c.id !== id));
+  }
+
+  const sectionStyle = {
+    background: "#FFFFFF",
+    border: `1px solid ${theme.border}`,
+    borderRadius: 16,
+    padding: "16px",
+    marginBottom: 16,
+    boxShadow: "0 1px 2px rgba(31,42,36,0.06)",
+  };
+  const labelStyle = { display: "block", fontSize: "0.78rem", color: theme.textMuted, marginBottom: 4 };
+  const inputStyle = {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "9px 10px",
+    borderRadius: 9,
+    border: `1px solid ${theme.border}`,
+    fontFamily: "'Noto Naskh Arabic', serif",
+    fontSize: "0.9rem",
+    color: theme.textStrong,
+    background: "#FDFCF9",
+    marginBottom: 0,
+  };
+
+  function ContactFormFields({ f, setF }) {
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+        <div>
+          <label style={labelStyle}>قسم (Type)</label>
+          <select style={inputStyle} value={f.type} onChange={(e) => setF((p) => ({ ...p, type: e.target.value }))}>
+            <option value="phone">فون نمبر (Phone)</option>
+            <option value="email">ای میل (Email)</option>
+          </select>
+        </div>
+        <div>
+          <label style={labelStyle}>{f.type === "phone" ? "فون نمبر" : "ای میل ایڈریس"}</label>
+          <input
+            style={{ ...inputStyle, direction: "ltr", textAlign: "left" }}
+            value={f.value}
+            onChange={(e) => setF((p) => ({ ...p, value: e.target.value }))}
+            placeholder={f.type === "phone" ? "+92 300 1234567" : "info@example.org"}
+          />
+        </div>
+        <div>
+          <label style={labelStyle}>Label (اختیاری)</label>
+          <input
+            style={inputStyle}
+            value={f.label}
+            onChange={(e) => setF((p) => ({ ...p, label: e.target.value }))}
+            placeholder="مثلاً: سیکرٹری، خزانہ"
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div dir="rtl" lang="ur" style={{ minHeight: "100vh", background: `linear-gradient(180deg, ${theme.background} 0%, ${theme.backgroundAlt} 100%)`, fontFamily: "'Noto Naskh Arabic', serif", color: theme.textStrong }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400..700&family=Noto+Naskh+Arabic:wght@400..700&display=swap');`}</style>
+
+      <header style={{ background: `linear-gradient(135deg, ${theme.primary} 0%, ${theme.primaryDark} 100%)`, color: "#FBF9F4", position: "sticky", top: 0, zIndex: 20, padding: "14px 18px" }}>
+        <div style={{ maxWidth: 900, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Phone size={20} />
+            <h1 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.15rem", margin: 0 }}>رابطہ معلومات</h1>
+          </div>
+          <button
+            onClick={onBack}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(251,249,244,0.14)", border: "1px solid rgba(251,249,244,0.35)", color: "#FBF9F4", borderRadius: 999, padding: "7px 14px", fontSize: "0.85rem", cursor: "pointer", fontFamily: "'Noto Naskh Arabic', serif" }}
+          >
+            <ArrowRight size={15} />
+            ایڈمن پینل
+          </button>
+        </div>
+      </header>
+
+      <main style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px 120px" }}>
+        <section style={sectionStyle}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: showAddForm ? 14 : 0 }}>
+            <h2 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.05rem", color: theme.primary, margin: 0 }}>
+              فون نمبرز اور ای میلز
+            </h2>
+            <button
+              onClick={() => setShowAddForm((v) => !v)}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}
+            >
+              {showAddForm ? "بند کریں" : "+ نیا Contact شامل کریں"}
+            </button>
+          </div>
+
+          {showAddForm && (
+            <div style={{ borderTop: `1px dashed ${theme.border}`, paddingTop: 14 }}>
+              {ContactFormFields({ f: form, setF: setForm })}
+              <button
+                onClick={addContact}
+                disabled={!form.value.trim()}
+                style={{ marginTop: 12, background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 10, padding: "9px 18px", fontSize: "0.85rem", cursor: "pointer", opacity: form.value.trim() ? 1 : 0.5 }}
+              >
+                شامل کریں
+              </button>
+            </div>
+          )}
+        </section>
+
+        <section style={sectionStyle}>
+          <h2 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.05rem", color: theme.primary, margin: "0 0 12px" }}>
+            موجودہ Contacts
+          </h2>
+          <div style={{ display: "grid", gap: 10 }}>
+            {draftContacts.length === 0 && (
+              <p style={{ fontSize: "0.85rem", color: theme.textMuted, textAlign: "center", margin: 0 }}>ابھی کوئی contact شامل نہیں۔</p>
+            )}
+            {draftContacts.map((c) => {
+              const Icon = c.type === "phone" ? Phone : Mail;
+              return (
+                <div key={c.id} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, padding: 12, background: "#FDFCF9" }}>
+                  {editingId === c.id ? (
+                    <div>
+                      {ContactFormFields({ f: editForm, setF: setEditForm })}
+                      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                        <button onClick={() => saveEdit(c.id)} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: "0.8rem", cursor: "pointer" }}>
+                          محفوظ کریں
+                        </button>
+                        <button onClick={() => setEditingId(null)} style={{ background: "#fff", border: `1px solid ${theme.border}`, color: theme.textMuted, borderRadius: 9, padding: "7px 14px", fontSize: "0.8rem", cursor: "pointer" }}>
+                          منسوخ
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <div style={{ width: 34, height: 34, borderRadius: 9, background: "rgba(11,79,63,0.08)", display: "flex", alignItems: "center", justifyContent: "center", color: theme.primary, flexShrink: 0 }}>
+                        <Icon size={17} />
+                      </div>
+                      <div style={{ flex: "1 1 160px", minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontWeight: 700, direction: "ltr" }}>{c.value}</span>
+                          {c.label && <span style={{ fontSize: "0.72rem", color: theme.textMuted }}>({c.label})</span>}
+                          {c.status === "archived" && (
+                            <span style={{ background: "rgba(91,107,98,0.14)", color: theme.textMuted, borderRadius: 999, padding: "2px 9px", fontSize: "0.68rem" }}>غیر فعال</span>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button onClick={() => startEdit(c)} style={{ border: `1px solid ${theme.border}`, background: "#fff", color: theme.primary, borderRadius: 999, padding: "5px 11px", fontSize: "0.72rem", cursor: "pointer" }}>
+                          ترمیم
+                        </button>
+                        <button onClick={() => toggleStatus(c.id)} style={{ border: "none", background: c.status === "active" ? "rgba(91,107,98,0.14)" : "rgba(11,79,63,0.1)", color: c.status === "active" ? theme.textMuted : theme.primary, borderRadius: 999, padding: "5px 11px", fontSize: "0.72rem", cursor: "pointer" }}>
+                          {c.status === "active" ? "غیر فعال کریں" : "فعال کریں"}
+                        </button>
+                        <button onClick={() => removeContact(c.id)} style={{ border: "none", background: "rgba(178,52,52,0.1)", color: "#B23434", borderRadius: 999, padding: "5px 11px", fontSize: "0.72rem", cursor: "pointer" }}>
+                          حذف کریں
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      </main>
+
+      <div style={{ position: "fixed", bottom: 0, insetInlineStart: 0, insetInlineEnd: 0, background: "#FFFFFF", borderTop: `1px solid ${theme.border}`, padding: "12px 16px", display: "flex", justifyContent: "center", gap: 12, boxShadow: "0 -6px 16px rgba(31,42,36,0.08)", zIndex: 25 }}>
+        {savedFlash && (
+          <span style={{ display: "flex", alignItems: "center", gap: 6, color: theme.primary, fontSize: "0.85rem", alignSelf: "center" }}>
+            <CheckCircle2 size={16} /> تبدیلیاں کامیابی سے محفوظ ہوگئیں
+          </span>
+        )}
+        <button
+          onClick={handleSave}
+          style={{ display: "flex", alignItems: "center", gap: 8, background: `linear-gradient(135deg, ${theme.primary} 0%, ${theme.primaryDark} 100%)`, color: "#FBF9F4", border: "none", borderRadius: 12, padding: "12px 28px", fontSize: "0.95rem", fontFamily: "'Noto Naskh Arabic', serif", cursor: "pointer", boxShadow: "0 6px 16px rgba(11,79,63,0.28)" }}
+        >
+          <Save size={17} />
+          تبدیلیاں محفوظ کریں
+        </button>
+      </div>
     </div>
   );
 }
