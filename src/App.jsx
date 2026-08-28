@@ -2959,7 +2959,7 @@ function DastoorPage({ theme, card, chapters, clauses, onBack }) {
         {structure.map((chapter) => (
           <section key={chapter.id} style={{ marginBottom: 28 }}>
             <h2 className="kw-heading" style={{ fontSize: "1.25rem", color: theme.primary, borderBottom: `2px solid ${theme.border}`, paddingBottom: 8, marginBottom: 12 }}>
-              باب {chapter.number}: {chapter.title}
+              {chapter.title}
             </h2>
             {chapter.clauses.length === 0 ? (
               <p style={{ color: theme.textMuted, fontSize: "0.85rem" }}>اس باب میں ابھی کوئی دفعہ شامل نہیں۔</p>
@@ -2967,7 +2967,7 @@ function DastoorPage({ theme, card, chapters, clauses, onBack }) {
               chapter.clauses.map((clause) => (
                 <div key={clause.id} style={{ marginBottom: 14, paddingInlineStart: 4 }}>
                   <h3 style={{ fontSize: "0.98rem", color: theme.textStrong, margin: "0 0 4px" }}>
-                    دفعہ {clause.number}: {clause.title}
+                    {clause.title}
                   </h3>
                   <p
                     style={{
@@ -3036,6 +3036,17 @@ function DastoorManagement({ theme, chapters, clauses, onApply, onBack }) {
     setDraftChapters((prev) => prev.map((c) => (c.id === id ? { ...c, status } : c)));
   }
 
+  function deleteChapter(id) {
+    if (!window.confirm("کیا آپ واقعی یہ Dastoor entry حذف کرنا چاہتے ہیں؟")) return;
+    setDraftChapters((prev) => prev.filter((c) => c.id !== id));
+    // Clauses belonging to a deleted chapter become orphaned data if left
+    // behind, so remove them too. Any Notice that referenced one of these
+    // clauses/chapters is NOT touched or deleted — dastoorRefLabel() already
+    // safely returns null for a missing chapter/clause id, so the Notice
+    // just stops showing that reference line instead of breaking.
+    setDraftClauses((prev) => prev.filter((cl) => cl.chapterId !== id));
+  }
+
   function moveChapter(id, direction) {
     setDraftChapters((prev) => {
       const sorted = [...prev].sort((a, b) => a.order - b.order);
@@ -3070,6 +3081,11 @@ function DastoorManagement({ theme, chapters, clauses, onApply, onBack }) {
 
   function setClauseStatus(id, status) {
     setDraftClauses((prev) => prev.map((cl) => (cl.id === id ? { ...cl, status } : cl)));
+  }
+
+  function deleteClause(id) {
+    if (!window.confirm("کیا آپ واقعی یہ Dastoor entry حذف کرنا چاہتے ہیں؟")) return;
+    setDraftClauses((prev) => prev.filter((cl) => cl.id !== id));
   }
 
   function moveClause(chapterId, id, direction) {
@@ -3199,6 +3215,13 @@ function DastoorManagement({ theme, chapters, clauses, onApply, onBack }) {
                 </button>
 
                 <button
+                  onClick={() => deleteChapter(chapter.id)}
+                  style={{ border: "none", borderRadius: 999, padding: "6px 12px", fontSize: "0.72rem", cursor: "pointer", background: "rgba(178,52,52,0.1)", color: "#B23434" }}
+                >
+                  حذف کریں
+                </button>
+
+                <button
                   onClick={() => setExpandedChapterId(isExpanded ? null : chapter.id)}
                   style={{ border: `1px solid ${theme.border}`, background: "#fff", color: theme.primary, borderRadius: 999, padding: "6px 12px", fontSize: "0.72rem", cursor: "pointer" }}
                 >
@@ -3238,6 +3261,12 @@ function DastoorManagement({ theme, chapters, clauses, onApply, onBack }) {
                             }}
                           >
                             {clause.status === "active" ? "آرکائیو کریں" : "بحال کریں"}
+                          </button>
+                          <button
+                            onClick={() => deleteClause(clause.id)}
+                            style={{ border: "none", borderRadius: 999, padding: "4px 10px", fontSize: "0.68rem", cursor: "pointer", background: "rgba(178,52,52,0.1)", color: "#B23434" }}
+                          >
+                            حذف کریں
                           </button>
                         </div>
                         <input
