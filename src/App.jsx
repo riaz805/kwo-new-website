@@ -163,6 +163,12 @@ const DEFAULT_FUND_CONFIG = {
 // so history survives even if that member later becomes inactive/archived.
 const DEFAULT_PAYMENTS = [];
 
+// Minimal audit trail for permanently deleted fund/payment entries.
+// A deletion never removes anything from here — it only appends. Stored
+// as its own field in the SAME existing kwo/data document (no structural
+// change), same pattern as every other section.
+const DEFAULT_PAYMENT_DELETION_LOG = []; // { id, paymentId, memberId, amount, deletedAt }
+
 const MONTH_NAMES_UR = [
   "جنوری", "فروری", "مارچ", "اپریل", "مئی", "جون",
   "جولائی", "اگست", "ستمبر", "اکتوبر", "نومبر", "دسمبر",
@@ -311,6 +317,7 @@ export default function App() {
   const [fundConfig, setFundConfig] = useState(DEFAULT_FUND_CONFIG);
   const [members, setMembers] = useState(DEFAULT_MEMBERS);
   const [payments, setPayments] = useState(DEFAULT_PAYMENTS);
+  const [paymentDeletionLog, setPaymentDeletionLog] = useState(DEFAULT_PAYMENT_DELETION_LOG);
   const [expenses, setExpenses] = useState(DEFAULT_EXPENSES);
   const [dastoorChapters, setDastoorChapters] = useState(DEFAULT_DASTOOR_CHAPTERS);
   const [dastoorClauses, setDastoorClauses] = useState(DEFAULT_DASTOOR_CLAUSES);
@@ -406,6 +413,7 @@ export default function App() {
           if (d.fundConfig) setFundConfig(d.fundConfig);
           if (d.members) setMembers(d.members);
           if (d.payments) setPayments(d.payments);
+          if (d.paymentDeletionLog) setPaymentDeletionLog(d.paymentDeletionLog);
           if (d.expenses) setExpenses(d.expenses);
           if (d.dastoorChapters) setDastoorChapters(d.dastoorChapters);
           if (d.dastoorClauses) setDastoorClauses(d.dastoorClauses);
@@ -462,6 +470,7 @@ export default function App() {
           theme={siteConfig.theme}
           orgNameUrdu={siteConfig.orgNameUrdu}
           onBackToSite={() => setView("home")}
+          message={view === "funds" ? "فنڈ کی تفصیلات صرف فعال اراکین اور مجاز منتظمین کے لیے دستیاب ہیں۔" : undefined}
         />
       );
     }
@@ -565,7 +574,12 @@ export default function App() {
         members={members}
         fundConfig={fundConfig}
         payments={payments}
-        onApply={(nextPayments) => { setPayments(nextPayments); persist({ payments: nextPayments }); }}
+        deletionLog={paymentDeletionLog}
+        onApply={(nextPayments, nextDeletionLog) => {
+          setPayments(nextPayments);
+          setPaymentDeletionLog(nextDeletionLog);
+          persist({ payments: nextPayments, paymentDeletionLog: nextDeletionLog });
+        }}
         onBack={() => setView("admin")}
       />
     );
@@ -1063,13 +1077,8 @@ function HomePage({ siteConfig, cardRegistry, fundConfig, members, contactInfo, 
                   )}
 
                   {card.id === "funds" && (
-                    <div style={{ marginTop: 2, paddingTop: 8, borderTop: `1px dashed ${theme.border}`, fontSize: "0.78rem", color: theme.textStrong }}>
-                      <span>
-                        ماہانہ فنڈ:{" "}
-                        <strong style={{ color: theme.primary }}>
-                          {fundConfig.monthlyFundAmount} {fundConfig.currency}
-                        </strong>
-                      </span>
+                    <div style={{ marginTop: 2, paddingTop: 8, borderTop: `1px dashed ${theme.border}`, fontSize: "0.78rem", color: theme.textMuted }}>
+                      فنڈ کی تفصیلات صرف فعال اراکین اور مجاز منتظمین کے لیے دستیاب ہیں۔
                     </div>
                   )}
                 </button>
@@ -2071,12 +2080,15 @@ function emptyPaymentForm(fundConfig) {
   };
 }
 
-function FundsManagement({ theme, members, fundConfig, payments, onApply, onBack }) {
+function FundsManagement({ theme, members, fundConfig, payments, deletionLog, onApply, onBack }) {
   const [draftPayments, setDraftPayments] = useState(payments);
+  const [draftDeletionLog, setDraftDeletionLog] = useState(deletionLog);
   const [savedFlash, setSavedFlash] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
   const [form, setForm] = useState(emptyPaymentForm(fundConfig));
   const [memberFilter, setMemberFilter] = useState("all");
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(null);
 
   const sortedMembers = [...members].sort((a, b) => a.name.localeCompare(b.name, "ur"));
 
@@ -2099,7 +2111,7 @@ function FundsManagement({ theme, members, fundConfig, payments, onApply, onBack
   }
 
   function handleSave() {
-    onApply(draftPayments);
+    onApply(draftPayments, draftDeletionLog);
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 2500);
   }
@@ -2124,6 +2136,64 @@ function FundsManagement({ theme, members, fundConfig, payments, onApply, onBack
     setDraftPayments((prev) => [record, ...prev]);
     setForm(emptyPaymentForm(fundConfig));
     setShowAddForm(false);
+  }
+
+  function startEdit(p) {
+    setEditingId(p.id);
+    setEditForm({
+      memberId: p.memberId,
+      month: p.month,
+      year: p.year,
+      paidAmount: String(p.paidAmount),
+      paymentDate: p.paymentDate,
+      notes: p.notes,
+    });
+  }
+
+  function saveEdit(id) {
+    setDraftPayments((prev) =>
+      prev.map((p) => {
+        if (p.id !== id) return p;
+        // The required-fund SNAPSHOT for this historical entry is kept as-is
+        // (not re-pulled from current fundConfig) — editing the paid amount
+        // re-runs the SAME computeFundBreakdown() engine against that
+        // original snapshot, it never invents a new calculation.
+        const breakdown = computeFundBreakdown(editForm.paidAmount, p.requiredFund);
+        return {
+          ...p,
+          memberId: editForm.memberId || p.memberId,
+          month: Number(editForm.month),
+          year: Number(editForm.year),
+          paidAmount: Number(editForm.paidAmount) || 0,
+          paidFund: breakdown.paidFund,
+          donation: breakdown.donation,
+          arrears: breakdown.arrears,
+          paymentDate: editForm.paymentDate,
+          notes: editForm.notes.trim(),
+        };
+      })
+    );
+    setEditingId(null);
+    setEditForm(null);
+  }
+
+  function deletePayment(p) {
+    if (!window.confirm("کیا آپ واقعی یہ Fund entry مستقل طور پر حذف کرنا چاہتے ہیں؟")) return;
+    setDraftPayments((prev) => prev.filter((x) => x.id !== p.id));
+    setDraftDeletionLog((prev) => [
+      {
+        id: `deletion-${Date.now()}`,
+        paymentId: p.id,
+        memberId: p.memberId,
+        amount: p.paidAmount,
+        deletedAt: new Date().toISOString(),
+      },
+      ...prev,
+    ]);
+    if (editingId === p.id) {
+      setEditingId(null);
+      setEditForm(null);
+    }
   }
 
   const sectionStyle = {
@@ -2284,21 +2354,94 @@ function FundsManagement({ theme, members, fundConfig, payments, onApply, onBack
             )}
             {filteredPayments.map((p) => (
               <div key={p.id} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, padding: 10, background: "#FDFCF9", fontSize: "0.8rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
-                  <strong>{memberLabel(p.memberId)}</strong>
-                  <span style={{ color: theme.textMuted }}>{MONTH_NAMES_UR[p.month - 1]} {p.year} · {p.paymentDate}</span>
-                </div>
-                <div style={{ marginTop: 4, color: theme.textMuted, display: "flex", gap: 12, flexWrap: "wrap" }}>
-                  <span>ادا کردہ: <strong style={{ color: theme.textStrong }}>{p.paidAmount}</strong></span>
-                  <span>Paid Fund: <strong style={{ color: theme.primary }}>{p.paidFund}</strong></span>
-                  <span>Donation: <strong style={{ color: theme.primary }}>{p.donation}</strong></span>
-                  <span>Arrears: <strong style={{ color: theme.primary }}>{p.arrears}</strong></span>
-                </div>
-                {p.notes && <div style={{ marginTop: 4, color: theme.textMuted, fontSize: "0.75rem" }}>{p.notes}</div>}
+                {editingId === p.id ? (
+                  <div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                      <div>
+                        <label style={labelStyle}>رکن (Member)</label>
+                        <select style={inputStyle} value={editForm.memberId} onChange={(e) => setEditForm((p2) => ({ ...p2, memberId: e.target.value }))}>
+                          {sortedMembers.map((m) => (
+                            <option key={m.id} value={m.id}>{m.name} ({m.memberId})</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label style={labelStyle}>مہینہ (Month)</label>
+                        <select style={inputStyle} value={editForm.month} onChange={(e) => setEditForm((p2) => ({ ...p2, month: e.target.value }))}>
+                          {MONTH_NAMES_UR.map((name, idx) => (
+                            <option key={name} value={idx + 1}>{name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label style={labelStyle}>سال (Year)</label>
+                        <input type="number" style={{ ...inputStyle, direction: "ltr" }} value={editForm.year} onChange={(e) => setEditForm((p2) => ({ ...p2, year: e.target.value }))} />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>ادا کردہ رقم (Paid Amount)</label>
+                        <input type="number" min="0" style={{ ...inputStyle, direction: "ltr" }} value={editForm.paidAmount} onChange={(e) => setEditForm((p2) => ({ ...p2, paidAmount: e.target.value }))} />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>تاریخ ادائیگی (Payment Date)</label>
+                        <input type="date" style={{ ...inputStyle, direction: "ltr" }} value={editForm.paymentDate} onChange={(e) => setEditForm((p2) => ({ ...p2, paymentDate: e.target.value }))} />
+                      </div>
+                      <div style={{ gridColumn: "1 / -1" }}>
+                        <label style={labelStyle}>نوٹس (Notes)</label>
+                        <input style={inputStyle} value={editForm.notes} onChange={(e) => setEditForm((p2) => ({ ...p2, notes: e.target.value }))} />
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                      <button onClick={() => saveEdit(p.id)} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: "0.8rem", cursor: "pointer" }}>
+                        محفوظ کریں
+                      </button>
+                      <button onClick={() => { setEditingId(null); setEditForm(null); }} style={{ background: "#fff", border: `1px solid ${theme.border}`, color: theme.textMuted, borderRadius: 9, padding: "7px 14px", fontSize: "0.8rem", cursor: "pointer" }}>
+                        منسوخ
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
+                      <strong>{memberLabel(p.memberId)}</strong>
+                      <span style={{ color: theme.textMuted }}>{MONTH_NAMES_UR[p.month - 1]} {p.year} · {p.paymentDate}</span>
+                    </div>
+                    <div style={{ marginTop: 4, color: theme.textMuted, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                      <span>ادا کردہ: <strong style={{ color: theme.textStrong }}>{p.paidAmount}</strong></span>
+                      <span>Paid Fund: <strong style={{ color: theme.primary }}>{p.paidFund}</strong></span>
+                      <span>Donation: <strong style={{ color: theme.primary }}>{p.donation}</strong></span>
+                      <span>Arrears: <strong style={{ color: theme.primary }}>{p.arrears}</strong></span>
+                    </div>
+                    {p.notes && <div style={{ marginTop: 4, color: theme.textMuted, fontSize: "0.75rem" }}>{p.notes}</div>}
+                    <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                      <button onClick={() => startEdit(p)} style={{ border: `1px solid ${theme.border}`, background: "#fff", color: theme.primary, borderRadius: 999, padding: "5px 11px", fontSize: "0.72rem", cursor: "pointer" }}>
+                        ترمیم
+                      </button>
+                      <button onClick={() => deletePayment(p)} style={{ border: "none", background: "rgba(178,52,52,0.1)", color: "#B23434", borderRadius: 999, padding: "5px 11px", fontSize: "0.72rem", cursor: "pointer" }}>
+                        مستقل حذف کریں
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
         </section>
+
+        {/* Deletion audit trail */}
+        {draftDeletionLog.length > 0 && (
+          <section style={sectionStyle}>
+            <h2 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.05rem", color: theme.primary, margin: "0 0 12px" }}>
+              حذف شدہ Entries کا ریکارڈ (Audit Trail)
+            </h2>
+            <div style={{ display: "grid", gap: 6 }}>
+              {draftDeletionLog.slice(0, 20).map((d) => (
+                <div key={d.id} style={{ fontSize: "0.75rem", color: theme.textMuted, borderBottom: `1px dashed ${theme.border}`, paddingBottom: 6 }}>
+                  {memberLabel(d.memberId)} — {d.amount} {fundConfig.currency} — حذف کی تاریخ: {new Date(d.deletedAt).toLocaleString("en-GB")}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
       </main>
 
       <div style={{ position: "fixed", bottom: 0, insetInlineStart: 0, insetInlineEnd: 0, background: "#FFFFFF", borderTop: `1px solid ${theme.border}`, padding: "12px 16px", display: "flex", justifyContent: "center", gap: 12, boxShadow: "0 -6px 16px rgba(31,42,36,0.08)", zIndex: 25 }}>
@@ -5366,7 +5509,7 @@ function AuthLoadingScreen({ theme }) {
   );
 }
 
-function LoginScreen({ theme, orgNameUrdu, onBackToSite }) {
+function LoginScreen({ theme, orgNameUrdu, onBackToSite, message }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -5450,6 +5593,12 @@ function LoginScreen({ theme, orgNameUrdu, onBackToSite }) {
           </h1>
           <p style={{ fontSize: "0.78rem", color: theme.textMuted, margin: 0 }}>{orgNameUrdu}</p>
         </div>
+
+        {message && (
+          <div style={{ background: "rgba(184,134,43,0.1)", color: theme.textStrong, borderRadius: 10, padding: "10px 12px", fontSize: "0.82rem", marginBottom: 16, textAlign: "center" }}>
+            {message}
+          </div>
+        )}
 
         <label style={labelStyle}>Email</label>
         <input type="email" style={inputStyle} value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" />
