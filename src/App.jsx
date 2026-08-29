@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { doc, getDoc, setDoc, collection, getDocs } from "firebase/firestore";
-import { auth, db } from "./firebaseConfig";
+import { auth, db, createMemberAuthAccount } from "./firebaseConfig";
 import {
   BookOpenText,
   Users,
@@ -149,6 +149,7 @@ const DEFAULT_MEMBERS = Array.from({ length: 16 }, (_, i) => ({
   photo: "",
   notes: "",
   status: "active",
+  authUid: null, // Firebase Auth UID once a Member login account is linked (see createMemberAuthAccount)
 }));
 
 const DEFAULT_FUND_CONFIG = {
@@ -379,11 +380,33 @@ export default function App() {
         if (snap.exists()) {
           setAdminRole(snap.data());
         } else {
-          setAdminRole({ role: "super_admin", sections: SECTION_KEYS, active: true });
+          // SECURITY: "no role doc" must NOT automatically mean super_admin.
+          // That fallback was only ever safe while the ONLY people who
+          // could sign in at all were admins. Now that Active Members can
+          // also get their own Firebase Auth accounts, an authenticated
+          // Member with no adminRoles doc must NOT fall through to full
+          // Admin Panel access. The one narrow exception kept here: if the
+          // adminRoles collection is COMPLETELY empty (nobody has ever been
+          // registered as an admin yet), the very first signed-in user is
+          // treated as super_admin once, so the site's original owner is
+          // never locked out of their own Admin Panel. The moment even one
+          // adminRoles doc exists, this exception stops applying to anyone
+          // else — which is exactly why, the first time you sign in after
+          // this update, you should immediately open Admin Panel → Admin
+          // Users and add YOURSELF explicitly as super_admin, before
+          // creating any Member accounts.
+          const existingRoles = await getDocs(collection(db, "adminRoles"));
+          if (existingRoles.empty) {
+            setAdminRole({ role: "super_admin", sections: SECTION_KEYS, active: true });
+          } else {
+            setAdminRole({ role: "none", sections: [], active: false });
+          }
         }
       } catch (err) {
         console.error("Failed to load admin role:", err);
-        setAdminRole({ role: "super_admin", sections: SECTION_KEYS, active: true });
+        // Fail CLOSED, not open — an error while checking permissions must
+        // never be treated as "so let them in".
+        setAdminRole({ role: "none", sections: [], active: false });
       }
       setRoleLoading(false);
     }
@@ -1641,6 +1664,10 @@ function MembersManagement({ theme, members, onApply, onBack }) {
   const [addForm, setAddForm] = useState(emptyMemberForm());
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(emptyMemberForm());
+  const [linkingId, setLinkingId] = useState(null);
+  const [linkForm, setLinkForm] = useState({ email: "", password: "" });
+  const [linkError, setLinkError] = useState("");
+  const [linkBusy, setLinkBusy] = useState(false);
 
   const stats = {
     total: draftMembers.length,
@@ -1661,6 +1688,54 @@ function MembersManagement({ theme, members, onApply, onBack }) {
     setDraftMembers((prev) => prev.map((m) => (m.id === id ? { ...m, status } : m)));
   }
 
+  /* ---- Member login account creation ----
+     Creates a real Firebase Auth account (email+password fully owned and
+     stored by Firebase Auth itself — never touches Firestore) via a
+     temporary secondary Firebase App instance, so the currently signed-in
+     Admin's own session is never disturbed. On success, only the returned
+     UID is saved onto the member record (authUid) — this is the link that
+     a (future) secure per-member Firestore rule would check against
+     request.auth.uid. This screen does NOT yet grant that member any
+     private Fund view — see the accompanying report for why that piece
+     needs a separate, carefully tested database restructuring step. */
+  function startLinkAccount(memberId) {
+    setLinkingId(memberId);
+    setLinkForm({ email: "", password: "" });
+    setLinkError("");
+  }
+
+  async function submitLinkAccount(memberId) {
+    setLinkError("");
+    if (!linkForm.email.trim() || !linkForm.password) {
+      setLinkError("Email اور Password دونوں درج کریں۔");
+      return;
+    }
+    if (linkForm.password.length < 6) {
+      setLinkError("Password کم از کم 6 حروف کا ہونا چاہیے (Firebase کی شرط)۔");
+      return;
+    }
+    setLinkBusy(true);
+    try {
+      const uid = await createMemberAuthAccount(linkForm.email.trim(), linkForm.password);
+      setDraftMembers((prev) => prev.map((m) => (m.id === memberId ? { ...m, authUid: uid } : m)));
+      setLinkingId(null);
+      setLinkForm({ email: "", password: "" });
+    } catch (err) {
+      console.error("Member account creation failed:", err);
+      if (err && err.code === "auth/email-already-in-use") {
+        setLinkError("یہ Email پہلے سے کسی اور اکاؤنٹ کے لیے استعمال ہو چکی ہے۔");
+      } else {
+        setLinkError("اکاؤنٹ بنانے میں مسئلہ ہوا۔ دوبارہ کوشش کریں۔");
+      }
+    }
+    setLinkBusy(false);
+  }
+
+  function unlinkAccount(memberId) {
+    if (!window.confirm("کیا آپ واقعی اس رکن کا لاگ اِن اکاؤنٹ اس ریکارڈ سے ہٹانا چاہتے ہیں؟ (Firebase اکاؤنٹ خود حذف نہیں ہوگا، صرف اس رکن سے اس کا تعلق ختم ہوگا۔)")) return;
+    setDraftMembers((prev) => prev.map((m) => (m.id === memberId ? { ...m, authUid: null } : m)));
+  }
+
   function addMember() {
     if (!addForm.name.trim()) return;
     const nextIndex = draftMembers.length + 1;
@@ -1673,6 +1748,7 @@ function MembersManagement({ theme, members, onApply, onBack }) {
       photo: addForm.photo.trim(),
       notes: addForm.notes.trim(),
       status: "active",
+      authUid: null,
     };
     setDraftMembers((prev) => [...prev, newMember]);
     setAddForm(emptyMemberForm());
@@ -1928,7 +2004,53 @@ function MembersManagement({ theme, members, onApply, onBack }) {
                           آرکائیو کریں
                         </button>
                       )}
+                      {member.authUid ? (
+                        <button onClick={() => unlinkAccount(member.id)} style={{ border: "none", background: "rgba(11,79,63,0.1)", color: theme.primary, borderRadius: 999, padding: "5px 11px", fontSize: "0.72rem", cursor: "pointer" }}>
+                          ✓ اکاؤنٹ موجود ہے
+                        </button>
+                      ) : (
+                        <button onClick={() => startLinkAccount(member.id)} style={{ border: `1px solid ${theme.border}`, background: "#fff", color: theme.textMuted, borderRadius: 999, padding: "5px 11px", fontSize: "0.72rem", cursor: "pointer" }}>
+                          Login Account بنائیں
+                        </button>
+                      )}
                     </div>
+
+                    {linkingId === member.id && (
+                      <div style={{ width: "100%", marginTop: 10, borderTop: `1px dashed ${theme.border}`, paddingTop: 10 }}>
+                        <p style={{ fontSize: "0.75rem", color: theme.textMuted, margin: "0 0 8px" }}>
+                          اس رکن کے لیے نیا لاگ اِن اکاؤنٹ — Email اور Password دیں (کم از کم 6 حروف)۔
+                        </p>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <input
+                            type="email"
+                            placeholder="Email"
+                            value={linkForm.email}
+                            onChange={(e) => setLinkForm((p) => ({ ...p, email: e.target.value }))}
+                            style={{ flex: "1 1 160px", boxSizing: "border-box", padding: "8px 10px", borderRadius: 9, border: `1px solid ${theme.border}`, fontSize: "0.85rem", direction: "ltr", textAlign: "left" }}
+                          />
+                          <input
+                            type="password"
+                            placeholder="Password"
+                            value={linkForm.password}
+                            onChange={(e) => setLinkForm((p) => ({ ...p, password: e.target.value }))}
+                            style={{ flex: "1 1 140px", boxSizing: "border-box", padding: "8px 10px", borderRadius: 9, border: `1px solid ${theme.border}`, fontSize: "0.85rem", direction: "ltr", textAlign: "left" }}
+                          />
+                        </div>
+                        {linkError && <p style={{ fontSize: "0.75rem", color: "#B23434", margin: "8px 0 0" }}>{linkError}</p>}
+                        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                          <button
+                            onClick={() => submitLinkAccount(member.id)}
+                            disabled={linkBusy}
+                            style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: "0.78rem", cursor: linkBusy ? "default" : "pointer", opacity: linkBusy ? 0.7 : 1 }}
+                          >
+                            {linkBusy ? "بن رہا ہے..." : "اکاؤنٹ بنائیں"}
+                          </button>
+                          <button onClick={() => setLinkingId(null)} style={{ background: "#fff", border: `1px solid ${theme.border}`, color: theme.textMuted, borderRadius: 9, padding: "7px 14px", fontSize: "0.78rem", cursor: "pointer" }}>
+                            منسوخ
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
