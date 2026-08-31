@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc, collection, getDocs } from "firebase/firestore";
+import { doc, getDoc, setDoc, collection, getDocs, writeBatch } from "firebase/firestore";
 import { auth, db, createMemberAuthAccount } from "./firebaseConfig";
 import {
   BookOpenText,
@@ -461,6 +461,43 @@ export default function App() {
     }
   }
 
+  /* ---- STEP 1 of the Member-privacy migration: additive mirroring ----
+     Writes a COPY of each member/payment into its own top-level Firestore
+     document (members/{id}, payments/{id}) — completely additive. The
+     app still reads everything from kwo/data exactly as before; nothing
+     about current behavior changes. This only starts building up the
+     standalone collections that a future, carefully-tested security rule
+     will actually protect. Safe to run repeatedly — it's just an
+     overwrite-with-latest-data mirror, never a delete of kwo/data.
+     Deleting a payment (which the app DOES already support) also deletes
+     its mirrored copy, so the two never drift apart. */
+  async function mirrorMembersToCollection(memberList) {
+    try {
+      const batch = writeBatch(db);
+      memberList.forEach((m) => {
+        batch.set(doc(db, "members", m.id), m);
+      });
+      await batch.commit();
+    } catch (err) {
+      console.error("Member mirroring to standalone collection failed:", err);
+    }
+  }
+
+  async function mirrorPaymentsToCollection(paymentList, deletedIds) {
+    try {
+      const batch = writeBatch(db);
+      paymentList.forEach((p) => {
+        batch.set(doc(db, "payments", p.id), p);
+      });
+      (deletedIds || []).forEach((id) => {
+        batch.delete(doc(db, "payments", id));
+      });
+      await batch.commit();
+    } catch (err) {
+      console.error("Payment mirroring to standalone collection failed:", err);
+    }
+  }
+
   if (!dataLoaded) {
     return <AuthLoadingScreen theme={DEFAULT_SITE_CONFIG.theme} />;
   }
@@ -555,6 +592,10 @@ export default function App() {
         onOpenActivities={() => setView("activities-admin")}
         onOpenAchievements={() => setView("achievements-admin")}
         onOpenContact={() => setView("contact-admin")}
+        onMigrateNow={async () => {
+          await mirrorMembersToCollection(members);
+          await mirrorPaymentsToCollection(payments, []);
+        }}
       />
     );
   }
@@ -584,7 +625,11 @@ export default function App() {
       <MembersManagement
         theme={siteConfig.theme}
         members={members}
-        onApply={(nextMembers) => { setMembers(nextMembers); persist({ members: nextMembers }); }}
+        onApply={(nextMembers) => {
+          setMembers(nextMembers);
+          persist({ members: nextMembers });
+          mirrorMembersToCollection(nextMembers);
+        }}
         onBack={() => setView("admin")}
       />
     );
@@ -599,9 +644,12 @@ export default function App() {
         payments={payments}
         deletionLog={paymentDeletionLog}
         onApply={(nextPayments, nextDeletionLog) => {
+          const nextIds = new Set(nextPayments.map((p) => p.id));
+          const deletedIds = payments.filter((p) => !nextIds.has(p.id)).map((p) => p.id);
           setPayments(nextPayments);
           setPaymentDeletionLog(nextDeletionLog);
           persist({ payments: nextPayments, paymentDeletionLog: nextDeletionLog });
+          mirrorPaymentsToCollection(nextPayments, deletedIds);
         }}
         onBack={() => setView("admin")}
       />
@@ -1210,11 +1258,24 @@ function HomePage({ siteConfig, cardRegistry, fundConfig, members, contactInfo, 
    "persistence" means in this phase — it resets on page reload,
    exactly as expected before a database is connected.
    ============================================================ */
-function AdminPanel({ siteConfig, cardRegistry, fundConfig, onApply, onBack, onLogout, isSuperAdmin, allowedSections, onOpenAdminUsers, onOpenMembers, onOpenFunds, onOpenExpenses, onOpenSummary, onOpenReports, onOpenDastoor, onOpenNotices, onOpenActivities, onOpenAchievements, onOpenContact }) {
+function AdminPanel({ siteConfig, cardRegistry, fundConfig, onApply, onBack, onLogout, isSuperAdmin, allowedSections, onOpenAdminUsers, onOpenMembers, onOpenFunds, onOpenExpenses, onOpenSummary, onOpenReports, onOpenDastoor, onOpenNotices, onOpenActivities, onOpenAchievements, onOpenContact, onMigrateNow }) {
   const [draftSite, setDraftSite] = useState(siteConfig);
   const [draftCards, setDraftCards] = useState(cardRegistry);
   const [draftFund, setDraftFund] = useState(fundConfig);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [migrateStatus, setMigrateStatus] = useState(""); // "" | "running" | "done" | "error"
+
+  async function handleMigrateNow() {
+    setMigrateStatus("running");
+    try {
+      await onMigrateNow();
+      setMigrateStatus("done");
+    } catch (err) {
+      console.error("Migration failed:", err);
+      setMigrateStatus("error");
+    }
+    setTimeout(() => setMigrateStatus(""), 4000);
+  }
 
   function canSee(section) {
     return isSuperAdmin || allowedSections.includes(section);
@@ -1380,6 +1441,30 @@ function AdminPanel({ siteConfig, cardRegistry, fundConfig, onApply, onBack, onL
               >
                 <ShieldCheck size={15} />
                 Admin Users
+              </button>
+            )}
+            {isSuperAdmin && (
+              <button
+                onClick={handleMigrateNow}
+                disabled={migrateStatus === "running"}
+                title="موجودہ Members اور Payments کو الگ محفوظ Firestore collections میں کاپی کریں (کچھ نہیں حذف ہوگا)"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  background: "rgba(251,249,244,0.14)",
+                  border: "1px solid rgba(251,249,244,0.35)",
+                  color: "#FBF9F4",
+                  borderRadius: 999,
+                  padding: "7px 14px",
+                  fontSize: "0.85rem",
+                  cursor: migrateStatus === "running" ? "default" : "pointer",
+                  fontFamily: "'Noto Naskh Arabic', serif",
+                  opacity: migrateStatus === "running" ? 0.7 : 1,
+                }}
+              >
+                <ShieldCheck size={15} />
+                {migrateStatus === "running" ? "کاپی ہو رہا ہے..." : migrateStatus === "done" ? "✓ محفوظ کاپی ہو گئی" : migrateStatus === "error" ? "مسئلہ ہوا، دوبارہ کوشش کریں" : "Secure Collections کاپی کریں"}
               </button>
             )}
             <button
