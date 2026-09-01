@@ -424,9 +424,17 @@ export default function App() {
      Admin can write to it (enforced by Firestore security rules
      in the Firebase Console, not by this code). */
   const [dataLoaded, setDataLoaded] = useState(false);
+  const [membersLoadError, setMembersLoadError] = useState(false);
+  const [paymentsLoadError, setPaymentsLoadError] = useState(false);
+  const [membersWriteError, setMembersWriteError] = useState(false);
+  const [paymentsWriteError, setPaymentsWriteError] = useState(false);
 
   useEffect(() => {
     async function loadData() {
+      // kwo/data — everything EXCEPT members/payments, which now come
+      // from their own secure collections below. members[]/payments[]
+      // inside this document are intentionally left untouched as a
+      // backup; they are simply no longer read into live app state.
       try {
         const snap = await getDoc(doc(db, "kwo", "data"));
         if (snap.exists()) {
@@ -434,8 +442,6 @@ export default function App() {
           if (d.siteConfig) setSiteConfig(d.siteConfig);
           if (d.cardRegistry) setCardRegistry(d.cardRegistry);
           if (d.fundConfig) setFundConfig(d.fundConfig);
-          if (d.members) setMembers(d.members);
-          if (d.payments) setPayments(d.payments);
           if (d.paymentDeletionLog) setPaymentDeletionLog(d.paymentDeletionLog);
           if (d.expenses) setExpenses(d.expenses);
           if (d.dastoorChapters) setDastoorChapters(d.dastoorChapters);
@@ -446,8 +452,33 @@ export default function App() {
           if (d.contactInfo) setContactInfo(d.contactInfo);
         }
       } catch (err) {
-        console.error("Firestore load failed:", err);
+        console.error("Firestore load failed (kwo/data):", err);
       }
+
+      // Members — LIVE source is now the members/{memberId} collection.
+      // On failure this deliberately does NOT fall back to kwo/data —
+      // that would defeat the whole point of this migration. The Admin
+      // screens surface membersLoadError so this is never silent.
+      try {
+        const memberSnap = await getDocs(collection(db, "members"));
+        setMembers(memberSnap.docs.map((docSnap) => docSnap.data()));
+        setMembersLoadError(false);
+      } catch (err) {
+        console.error("Failed to load members from secure collection:", err);
+        setMembersLoadError(true);
+      }
+
+      // Payments — LIVE source is now the payments/{paymentId} collection.
+      // Same no-silent-fallback rule as above.
+      try {
+        const paymentSnap = await getDocs(collection(db, "payments"));
+        setPayments(paymentSnap.docs.map((docSnap) => docSnap.data()));
+        setPaymentsLoadError(false);
+      } catch (err) {
+        console.error("Failed to load payments from secure collection:", err);
+        setPaymentsLoadError(true);
+      }
+
       setDataLoaded(true);
     }
     loadData();
@@ -461,16 +492,14 @@ export default function App() {
     }
   }
 
-  /* ---- STEP 1 of the Member-privacy migration: additive mirroring ----
-     Writes a COPY of each member/payment into its own top-level Firestore
-     document (members/{id}, payments/{id}) — completely additive. The
-     app still reads everything from kwo/data exactly as before; nothing
-     about current behavior changes. This only starts building up the
-     standalone collections that a future, carefully-tested security rule
-     will actually protect. Safe to run repeatedly — it's just an
-     overwrite-with-latest-data mirror, never a delete of kwo/data.
-     Deleting a payment (which the app DOES already support) also deletes
-     its mirrored copy, so the two never drift apart. */
+  /* ---- Members/Payments — secure collections are now the LIVE path ----
+     mirrorMembersToCollection / mirrorPaymentsToCollection write to
+     members/{id} and payments/{id} — this IS the real save now, not a
+     shadow copy. persist({ members / payments }) into kwo/data is still
+     called alongside (see onApply handlers below) purely as a backup —
+     the app never reads that copy back. Both functions now return
+     true/false so the calling screen can show a clear error instead of
+     silently assuming the save worked. */
   async function mirrorMembersToCollection(memberList) {
     try {
       const batch = writeBatch(db);
@@ -478,8 +507,12 @@ export default function App() {
         batch.set(doc(db, "members", m.id), m);
       });
       await batch.commit();
+      setMembersWriteError(false);
+      return true;
     } catch (err) {
-      console.error("Member mirroring to standalone collection failed:", err);
+      console.error("Member write to secure collection failed:", err);
+      setMembersWriteError(true);
+      return false;
     }
   }
 
@@ -493,8 +526,12 @@ export default function App() {
         batch.delete(doc(db, "payments", id));
       });
       await batch.commit();
+      setPaymentsWriteError(false);
+      return true;
     } catch (err) {
-      console.error("Payment mirroring to standalone collection failed:", err);
+      console.error("Payment write to secure collection failed:", err);
+      setPaymentsWriteError(true);
+      return false;
     }
   }
 
@@ -625,10 +662,12 @@ export default function App() {
       <MembersManagement
         theme={siteConfig.theme}
         members={members}
+        loadError={membersLoadError}
+        writeError={membersWriteError}
         onApply={(nextMembers) => {
           setMembers(nextMembers);
-          persist({ members: nextMembers });
-          mirrorMembersToCollection(nextMembers);
+          persist({ members: nextMembers }); // kwo/data backup copy only — not read back
+          mirrorMembersToCollection(nextMembers); // real, live save
         }}
         onBack={() => setView("admin")}
       />
@@ -643,13 +682,15 @@ export default function App() {
         fundConfig={fundConfig}
         payments={payments}
         deletionLog={paymentDeletionLog}
+        loadError={paymentsLoadError}
+        writeError={paymentsWriteError}
         onApply={(nextPayments, nextDeletionLog) => {
           const nextIds = new Set(nextPayments.map((p) => p.id));
           const deletedIds = payments.filter((p) => !nextIds.has(p.id)).map((p) => p.id);
           setPayments(nextPayments);
           setPaymentDeletionLog(nextDeletionLog);
-          persist({ payments: nextPayments, paymentDeletionLog: nextDeletionLog });
-          mirrorPaymentsToCollection(nextPayments, deletedIds);
+          persist({ payments: nextPayments, paymentDeletionLog: nextDeletionLog }); // kwo/data backup copy only
+          mirrorPaymentsToCollection(nextPayments, deletedIds); // real, live save
         }}
         onBack={() => setView("admin")}
       />
@@ -1741,7 +1782,7 @@ function emptyMemberForm() {
   return { memberId: "", name: "", contactNumber: "", joiningDate: "", photo: "", notes: "" };
 }
 
-function MembersManagement({ theme, members, onApply, onBack }) {
+function MembersManagement({ theme, members, loadError, writeError, onApply, onBack }) {
   const [draftMembers, setDraftMembers] = useState(members);
   const [savedFlash, setSavedFlash] = useState(false);
   const [filter, setFilter] = useState("all"); // all | active | inactive | archived
@@ -1955,6 +1996,15 @@ function MembersManagement({ theme, members, onApply, onBack }) {
       </header>
 
       <main style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px 120px" }}>
+        {(loadError || writeError) && (
+          <section style={{ background: "rgba(178,52,52,0.1)", border: "1px solid #B23434", borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}>
+            <p style={{ margin: 0, fontSize: "0.85rem", color: "#B23434", fontWeight: 600 }}>
+              {loadError
+                ? "⚠️ محفوظ Members collection سے data لوڈ نہیں ہو سکا۔ نیچے دکھایا گیا data پرانا/نامکمل ہو سکتا ہے۔"
+                : "⚠️ آخری تبدیلی محفوظ collection میں save نہیں ہو سکی۔ براہ کرم دوبارہ کوشش کریں یا اپنا انٹرنیٹ کنکشن چیک کریں۔"}
+            </p>
+          </section>
+        )}
         {/* Stats */}
         <section style={sectionStyle}>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -2287,7 +2337,7 @@ function emptyPaymentForm(fundConfig) {
   };
 }
 
-function FundsManagement({ theme, members, fundConfig, payments, deletionLog, onApply, onBack }) {
+function FundsManagement({ theme, members, fundConfig, payments, deletionLog, loadError, writeError, onApply, onBack }) {
   const [draftPayments, setDraftPayments] = useState(payments);
   const [draftDeletionLog, setDraftDeletionLog] = useState(deletionLog);
   const [savedFlash, setSavedFlash] = useState(false);
@@ -2448,6 +2498,15 @@ function FundsManagement({ theme, members, fundConfig, payments, deletionLog, on
       </header>
 
       <main style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px 120px" }}>
+        {(loadError || writeError) && (
+          <section style={{ background: "rgba(178,52,52,0.1)", border: "1px solid #B23434", borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}>
+            <p style={{ margin: 0, fontSize: "0.85rem", color: "#B23434", fontWeight: 600 }}>
+              {loadError
+                ? "⚠️ محفوظ Payments collection سے data لوڈ نہیں ہو سکا۔ نیچے دکھایا گیا data پرانا/نامکمل ہو سکتا ہے۔"
+                : "⚠️ آخری تبدیلی محفوظ collection میں save نہیں ہو سکی۔ براہ کرم دوبارہ کوشش کریں یا اپنا انٹرنیٹ کنکشن چیک کریں۔"}
+            </p>
+          </section>
+        )}
         {/* Totals */}
         <section style={sectionStyle}>
           <p style={{ fontSize: "0.78rem", color: theme.textMuted, margin: "0 0 10px" }}>
