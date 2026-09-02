@@ -817,7 +817,7 @@ export default function App() {
     const matchedMember = members.find((m) => m.authUid === authUser.uid && m.status === "active");
     if (matchedMember) {
       return (
-        <MemberPortalWelcomeScreen
+        <MemberDashboard
           theme={siteConfig.theme}
           member={matchedMember}
           orgNameUrdu={siteConfig.orgNameUrdu}
@@ -6649,16 +6649,13 @@ function MemberLoginScreen({ theme, orgNameUrdu, onBackToSite }) {
   );
 }
 
-function MemberPortalWelcomeScreen({ theme, member, orgNameUrdu, onLogout, onBackToSite }) {
+function MemberDashboard({ theme, member, orgNameUrdu, onLogout, onBackToSite }) {
   return (
     <div
       dir="rtl"
       lang="ur"
       style={{
         minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
         padding: 18,
         background: `linear-gradient(180deg, ${theme.background} 0%, ${theme.backgroundAlt} 100%)`,
         fontFamily: "'Noto Naskh Arabic', serif",
@@ -6666,22 +6663,56 @@ function MemberPortalWelcomeScreen({ theme, member, orgNameUrdu, onLogout, onBac
       }}
     >
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400..700&family=Noto+Naskh+Arabic:wght@400..700&display=swap');`}</style>
-      <div style={{ maxWidth: 400, textAlign: "center", background: "#FFFFFF", border: `1px solid ${theme.border}`, borderRadius: 18, padding: "28px 24px", boxShadow: "0 12px 28px rgba(11,79,63,0.12)" }}>
-        <div style={{ width: 48, height: 48, borderRadius: 12, margin: "0 auto 14px", background: "rgba(11,79,63,0.08)", display: "flex", alignItems: "center", justifyContent: "center", color: theme.primary }}>
-          <LogIn size={22} />
+
+      <div style={{ maxWidth: 460, margin: "40px auto 0" }}>
+        <div style={{ textAlign: "center", background: "#FFFFFF", border: `1px solid ${theme.border}`, borderRadius: 18, padding: "28px 24px", boxShadow: "0 12px 28px rgba(11,79,63,0.12)", marginBottom: 16 }}>
+          <div style={{ width: 48, height: 48, borderRadius: 12, margin: "0 auto 14px", background: "rgba(11,79,63,0.08)", display: "flex", alignItems: "center", justifyContent: "center", color: theme.primary }}>
+            <LogIn size={22} />
+          </div>
+          <h1 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.15rem", color: theme.primary, margin: "0 0 6px" }}>
+            خوش آمدید، {member.name}
+          </h1>
+          <p style={{ fontSize: "0.8rem", color: theme.textMuted, margin: 0 }}>{orgNameUrdu}</p>
         </div>
-        <h1 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.15rem", color: theme.primary, margin: "0 0 6px" }}>
-          خوش آمدید، {member.name}
-        </h1>
-        <p style={{ fontSize: "0.8rem", color: theme.textMuted, margin: "0 0 4px" }}>{orgNameUrdu}</p>
-        <p style={{ fontSize: "0.85rem", color: theme.textStrong, margin: "14px 0 20px", lineHeight: 1.9 }}>
-          آپ بطور فعال رکن کامیابی سے لاگ اِن ہو چکے ہیں۔ آپ کا ذاتی Fund Dashboard جلد اسی جگہ شامل کیا جائے گا۔
-        </p>
+
+        {/* Basic non-financial member info only — no fund/payment/arrears/
+            donation data is fetched or shown anywhere on this screen. */}
+        <div style={{ background: "#FFFFFF", border: `1px solid ${theme.border}`, borderRadius: 18, padding: "20px 22px", marginBottom: 16 }}>
+          <h2 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1rem", color: theme.primary, margin: "0 0 14px" }}>
+            آپ کی رکنیت کی معلومات
+          </h2>
+          <div style={{ display: "grid", gap: 10, fontSize: "0.85rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px dashed ${theme.border}`, paddingBottom: 8 }}>
+              <span style={{ color: theme.textMuted }}>نام</span>
+              <strong>{member.name}</strong>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px dashed ${theme.border}`, paddingBottom: 8 }}>
+              <span style={{ color: theme.textMuted }}>رکنیت نمبر</span>
+              <strong style={{ direction: "ltr" }}>{member.memberId}</strong>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px dashed ${theme.border}`, paddingBottom: 8 }}>
+              <span style={{ color: theme.textMuted }}>رکنیت کی حیثیت</span>
+              <span style={{ background: "rgba(11,79,63,0.1)", color: theme.primary, borderRadius: 999, padding: "3px 12px", fontSize: "0.78rem", fontWeight: 600 }}>
+                فعال
+              </span>
+            </div>
+            {member.joiningDate && (
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: theme.textMuted }}>تاریخ شمولیت</span>
+                <strong style={{ direction: "ltr" }}>{member.joiningDate}</strong>
+              </div>
+            )}
+          </div>
+          <p style={{ fontSize: "0.78rem", color: theme.textMuted, marginTop: 16, marginBottom: 0, lineHeight: 1.8 }}>
+            آپ کا ذاتی Fund/Payment Dashboard جلد اسی جگہ شامل کیا جائے گا۔
+          </p>
+        </div>
+
         <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
-          <button onClick={onBackToSite} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}>
+          <button onClick={onBackToSite} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 999, padding: "9px 18px", fontSize: "0.82rem", cursor: "pointer" }}>
             ویب سائٹ دیکھیں
           </button>
-          <button onClick={onLogout} style={{ background: "#fff", border: `1px solid ${theme.border}`, color: theme.textMuted, borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}>
+          <button onClick={onLogout} style={{ background: "#fff", border: `1px solid ${theme.border}`, color: theme.textMuted, borderRadius: 999, padding: "9px 18px", fontSize: "0.82rem", cursor: "pointer" }}>
             لاگ آؤٹ
           </button>
         </div>
