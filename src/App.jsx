@@ -30,6 +30,7 @@ import {
   EyeOff,
   CheckCircle2,
   LogOut,
+  LogIn,
 } from "lucide-react";
 
 /* ============================================================
@@ -791,6 +792,50 @@ export default function App() {
     );
   }
 
+  /* ---- STEP 3-A: Member Login — foundation only ----
+     Completely separate from the Admin gate above (ADMIN_ONLY_VIEWS never
+     includes "member-portal", so none of the Admin/role logic runs here).
+     This only answers ONE question: is the signed-in Firebase Auth UID
+     linked (via authUid) to a member whose status is currently 'active'?
+     It does NOT read or show any Fund/payment data, and does NOT grant
+     Admin access under any circumstance — those are explicitly later
+     steps. Inactive/archived members are treated exactly like an
+     unmatched account (not authorized). */
+  if (view === "member-portal") {
+    if (authLoading) {
+      return <AuthLoadingScreen theme={siteConfig.theme} />;
+    }
+    if (!authUser) {
+      return (
+        <MemberLoginScreen
+          theme={siteConfig.theme}
+          orgNameUrdu={siteConfig.orgNameUrdu}
+          onBackToSite={() => setView("home")}
+        />
+      );
+    }
+    const matchedMember = members.find((m) => m.authUid === authUser.uid && m.status === "active");
+    if (matchedMember) {
+      return (
+        <MemberPortalWelcomeScreen
+          theme={siteConfig.theme}
+          member={matchedMember}
+          orgNameUrdu={siteConfig.orgNameUrdu}
+          onLogout={() => { signOut(auth); setView("home"); }}
+          onBackToSite={() => setView("home")}
+        />
+      );
+    }
+    return (
+      <MemberNotAuthorizedScreen
+        theme={siteConfig.theme}
+        orgNameUrdu={siteConfig.orgNameUrdu}
+        onLogout={() => { signOut(auth); setView("home"); }}
+        onBackToSite={() => setView("home")}
+      />
+    );
+  }
+
   const openCard = cardRegistry.find((c) => c.id === view);
   if (openCard && openCard.id === "constitution") {
     return (
@@ -850,6 +895,7 @@ export default function App() {
       members={members}
       contactInfo={contactInfo}
       onOpenAdmin={() => setView("admin")}
+      onOpenMemberLogin={() => setView("member-portal")}
       onOpenCard={(cardId) => setView(cardId)}
     />
   );
@@ -859,7 +905,7 @@ export default function App() {
    PUBLIC HOME PAGE (Phase 1A design, unchanged — now reads its
    data from props instead of module-level constants)
    ============================================================ */
-function HomePage({ siteConfig, cardRegistry, fundConfig, members, contactInfo, onOpenAdmin, onOpenCard }) {
+function HomePage({ siteConfig, cardRegistry, fundConfig, members, contactInfo, onOpenAdmin, onOpenMemberLogin, onOpenCard }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { theme } = siteConfig;
 
@@ -1277,6 +1323,38 @@ function HomePage({ siteConfig, cardRegistry, fundConfig, members, contactInfo, 
       >
         <Settings size={16} />
         ایڈمن پینل
+      </button>
+
+      {/* Separate, clearly distinct entry point for Member Login — different
+          side, different icon, different color, so it can never be mistaken
+          for the Admin Panel button. Members log in with the same
+          Firebase email/password system, but this leads to a completely
+          different flow (member identity check), never Admin access. */}
+      <button
+        onClick={onOpenMemberLogin}
+        className="kw-admin-fab"
+        aria-label="رکن لاگ اِن کریں"
+        style={{
+          position: "fixed",
+          bottom: 18,
+          insetInlineEnd: 18,
+          zIndex: 40,
+          background: theme.accent,
+          color: theme.primaryDark,
+          border: "none",
+          borderRadius: 999,
+          padding: "10px 16px",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          fontSize: "0.85rem",
+          fontFamily: "'Noto Naskh Arabic', serif",
+          cursor: "pointer",
+          boxShadow: "0 8px 18px rgba(184,134,43,0.35)",
+        }}
+      >
+        <LogIn size={16} />
+        رکن لاگ اِن
       </button>
 
       <style>{`
@@ -6416,6 +6494,238 @@ function ContactManagement({ theme, contactInfo, onApply, onBack }) {
           <Save size={17} />
           تبدیلیاں محفوظ کریں
         </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   MEMBER LOGIN — STEP 3-A (foundation only)
+   ------------------------------------------------------------
+   Uses the SAME primary `auth` instance and the same
+   signInWithEmailAndPassword call as Admin login — Members and
+   Admins share one Firebase Auth user pool. The distinction is
+   entirely about what happens AFTER sign-in (see the routing in
+   <App>): this screen itself grants nothing by itself, it only
+   authenticates. No Fund/payment data is read or shown anywhere
+   in this file yet — that is explicitly a later step.
+   ============================================================ */
+function MemberLoginScreen({ theme, orgNameUrdu, onBackToSite }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setError("");
+    if (!email.trim() || !password) {
+      setError("براہ کرم ای میل اور پاس ورڈ درج کریں۔");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+      // onAuthStateChanged in <App> picks this up automatically, and
+      // the member-portal routing then checks authUid matching.
+    } catch (err) {
+      setError("Login ناکام ہوا۔ ای میل یا پاس ورڈ درست نہیں، یا یہ اکاؤنٹ موجود نہیں۔");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const inputStyle = {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "10px 12px",
+    borderRadius: 10,
+    border: `1px solid ${theme.border}`,
+    fontFamily: "'Noto Naskh Arabic', serif",
+    fontSize: "0.92rem",
+    color: theme.textStrong,
+    background: "#FDFCF9",
+    marginBottom: 12,
+    direction: "ltr",
+    textAlign: "left",
+  };
+  const labelStyle = { display: "block", fontSize: "0.8rem", color: theme.textMuted, marginBottom: 4 };
+
+  return (
+    <div
+      dir="rtl"
+      lang="ur"
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 18,
+        background: `linear-gradient(180deg, ${theme.background} 0%, ${theme.backgroundAlt} 100%)`,
+        fontFamily: "'Noto Naskh Arabic', serif",
+        color: theme.textStrong,
+      }}
+    >
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400..700&family=Noto+Naskh+Arabic:wght@400..700&display=swap');`}</style>
+
+      <form
+        onSubmit={handleLogin}
+        style={{
+          width: "100%",
+          maxWidth: 380,
+          background: "#FFFFFF",
+          border: `1px solid ${theme.border}`,
+          borderRadius: 18,
+          padding: "28px 24px",
+          boxShadow: "0 12px 28px rgba(11,79,63,0.12)",
+        }}
+      >
+        <div style={{ textAlign: "center", marginBottom: 20 }}>
+          <div
+            style={{
+              width: 48, height: 48, borderRadius: 12, margin: "0 auto 12px",
+              background: `linear-gradient(135deg, ${theme.accent} 0%, #9C6E1F 100%)`,
+              display: "flex", alignItems: "center", justifyContent: "center", color: theme.primaryDark,
+            }}
+          >
+            <LogIn size={22} />
+          </div>
+          <h1 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.15rem", color: theme.primary, margin: "0 0 4px" }}>
+            رکن لاگ اِن
+          </h1>
+          <p style={{ fontSize: "0.78rem", color: theme.textMuted, margin: 0 }}>{orgNameUrdu}</p>
+        </div>
+
+        <label style={labelStyle}>Email</label>
+        <input type="email" style={inputStyle} value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" />
+
+        <label style={labelStyle}>Password</label>
+        <input type="password" style={inputStyle} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+
+        {error && (
+          <div style={{ background: "rgba(178,52,52,0.1)", color: "#B23434", borderRadius: 9, padding: "8px 10px", fontSize: "0.78rem", marginBottom: 12 }}>
+            {error}
+          </div>
+        )}
+
+        <button
+          type="submit"
+          disabled={submitting}
+          style={{
+            width: "100%",
+            background: theme.accent,
+            color: theme.primaryDark,
+            border: "none",
+            borderRadius: 10,
+            padding: "11px",
+            fontSize: "0.9rem",
+            fontFamily: "'Noto Naskh Arabic', serif",
+            cursor: submitting ? "default" : "pointer",
+            opacity: submitting ? 0.7 : 1,
+            marginBottom: 10,
+            fontWeight: 600,
+          }}
+        >
+          {submitting ? "براہ کرم انتظار کریں..." : "Login"}
+        </button>
+
+        <button
+          type="button"
+          onClick={onBackToSite}
+          style={{
+            width: "100%",
+            background: "transparent",
+            border: "none",
+            color: theme.textMuted,
+            fontSize: "0.8rem",
+            cursor: "pointer",
+            fontFamily: "'Noto Naskh Arabic', serif",
+          }}
+        >
+          ویب سائٹ پر واپس جائیں
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function MemberPortalWelcomeScreen({ theme, member, orgNameUrdu, onLogout, onBackToSite }) {
+  return (
+    <div
+      dir="rtl"
+      lang="ur"
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 18,
+        background: `linear-gradient(180deg, ${theme.background} 0%, ${theme.backgroundAlt} 100%)`,
+        fontFamily: "'Noto Naskh Arabic', serif",
+        color: theme.textStrong,
+      }}
+    >
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400..700&family=Noto+Naskh+Arabic:wght@400..700&display=swap');`}</style>
+      <div style={{ maxWidth: 400, textAlign: "center", background: "#FFFFFF", border: `1px solid ${theme.border}`, borderRadius: 18, padding: "28px 24px", boxShadow: "0 12px 28px rgba(11,79,63,0.12)" }}>
+        <div style={{ width: 48, height: 48, borderRadius: 12, margin: "0 auto 14px", background: "rgba(11,79,63,0.08)", display: "flex", alignItems: "center", justifyContent: "center", color: theme.primary }}>
+          <LogIn size={22} />
+        </div>
+        <h1 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.15rem", color: theme.primary, margin: "0 0 6px" }}>
+          خوش آمدید، {member.name}
+        </h1>
+        <p style={{ fontSize: "0.8rem", color: theme.textMuted, margin: "0 0 4px" }}>{orgNameUrdu}</p>
+        <p style={{ fontSize: "0.85rem", color: theme.textStrong, margin: "14px 0 20px", lineHeight: 1.9 }}>
+          آپ بطور فعال رکن کامیابی سے لاگ اِن ہو چکے ہیں۔ آپ کا ذاتی Fund Dashboard جلد اسی جگہ شامل کیا جائے گا۔
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+          <button onClick={onBackToSite} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}>
+            ویب سائٹ دیکھیں
+          </button>
+          <button onClick={onLogout} style={{ background: "#fff", border: `1px solid ${theme.border}`, color: theme.textMuted, borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}>
+            لاگ آؤٹ
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MemberNotAuthorizedScreen({ theme, orgNameUrdu, onLogout, onBackToSite }) {
+  return (
+    <div
+      dir="rtl"
+      lang="ur"
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 18,
+        background: `linear-gradient(180deg, ${theme.background} 0%, ${theme.backgroundAlt} 100%)`,
+        fontFamily: "'Noto Naskh Arabic', serif",
+        color: theme.textStrong,
+      }}
+    >
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400..700&family=Noto+Naskh+Arabic:wght@400..700&display=swap');`}</style>
+      <div style={{ maxWidth: 400, textAlign: "center", background: "#FFFFFF", border: "1px solid #B23434", borderRadius: 18, padding: "28px 24px", boxShadow: "0 12px 28px rgba(178,52,52,0.1)" }}>
+        <div style={{ width: 48, height: 48, borderRadius: 12, margin: "0 auto 14px", background: "rgba(178,52,52,0.1)", display: "flex", alignItems: "center", justifyContent: "center", color: "#B23434" }}>
+          <ShieldCheck size={22} />
+        </div>
+        <h1 style={{ fontFamily: "'Noto Nastaliq Urdu', serif", fontSize: "1.15rem", color: "#B23434", margin: "0 0 6px" }}>
+          رسائی مجاز نہیں
+        </h1>
+        <p style={{ fontSize: "0.8rem", color: theme.textMuted, margin: "0 0 4px" }}>{orgNameUrdu}</p>
+        <p style={{ fontSize: "0.85rem", color: theme.textStrong, margin: "14px 0 20px", lineHeight: 1.9 }}>
+          یہ اکاؤنٹ فعال رکن کے طور پر مجاز نہیں ہے۔ اگر آپ کے خیال میں یہ غلطی ہے تو تنظیم کے منتظم سے رابطہ کریں۔
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+          <button onClick={onBackToSite} style={{ background: theme.primary, color: "#FBF9F4", border: "none", borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}>
+            ویب سائٹ دیکھیں
+          </button>
+          <button onClick={onLogout} style={{ background: "#fff", border: `1px solid ${theme.border}`, color: theme.textMuted, borderRadius: 999, padding: "8px 16px", fontSize: "0.82rem", cursor: "pointer" }}>
+            لاگ آؤٹ
+          </button>
+        </div>
       </div>
     </div>
   );
