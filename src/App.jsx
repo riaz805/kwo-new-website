@@ -493,14 +493,16 @@ export default function App() {
     }
   }
 
-  /* ---- Members/Payments — secure collections are now the LIVE path ----
+  /* ---- Members/Payments — secure collections are now the ONLY path ----
      mirrorMembersToCollection / mirrorPaymentsToCollection write to
-     members/{id} and payments/{id} — this IS the real save now, not a
-     shadow copy. persist({ members / payments }) into kwo/data is still
-     called alongside (see onApply handlers below) purely as a backup —
-     the app never reads that copy back. Both functions now return
-     true/false so the calling screen can show a clear error instead of
-     silently assuming the save worked. */
+     members/{id} and payments/{id} — this is the sole live save. As of
+     Step 3-C.1, members/payments are no longer written into kwo/data at
+     all (that public document is read by nobody for this data, so
+     leaving copies there served no purpose and only widened exposure).
+     paymentDeletionLog is unaffected and still saved into kwo/data
+     separately. Both mirror functions return true/false so the calling
+     screen can show a clear error instead of silently assuming the save
+     worked. */
   async function mirrorMembersToCollection(memberList) {
     try {
       const batch = writeBatch(db);
@@ -667,7 +669,12 @@ export default function App() {
         writeError={membersWriteError}
         onApply={(nextMembers) => {
           setMembers(nextMembers);
-          persist({ members: nextMembers }); // kwo/data backup copy only — not read back
+          // Members are no longer written into the public kwo/data document —
+          // that field is read by nobody (confirmed in Step 3-C.1 inspection),
+          // and leaving it there would mean anyone with the Firestore SDK
+          // could still read member records via that public document even
+          // though the live app itself never reads it back. The dedicated
+          // `members` collection below is now the ONLY place this is saved.
           mirrorMembersToCollection(nextMembers); // real, live save
         }}
         onBack={() => setView("admin")}
@@ -690,7 +697,12 @@ export default function App() {
           const deletedIds = payments.filter((p) => !nextIds.has(p.id)).map((p) => p.id);
           setPayments(nextPayments);
           setPaymentDeletionLog(nextDeletionLog);
-          persist({ payments: nextPayments, paymentDeletionLog: nextDeletionLog }); // kwo/data backup copy only
+          // Payments are no longer written into the public kwo/data document
+          // (same reasoning as Members, above) — the dedicated `payments`
+          // collection is now the ONLY place payment records are saved.
+          // paymentDeletionLog is left exactly as it was: still saved into
+          // kwo/data, since that behavior wasn't part of this step's scope.
+          persist({ paymentDeletionLog: nextDeletionLog });
           mirrorPaymentsToCollection(nextPayments, deletedIds); // real, live save
         }}
         onBack={() => setView("admin")}
