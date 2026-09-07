@@ -117,7 +117,7 @@ const DEFAULT_SITE_CONFIG = {
   footer: {
     aboutLine: "ایک شفاف اور فلاحی جذبے سے چلنے والی تنظیم۔",
     contactLabel: "رابطہ",
-    contactPlaceholder: "انتظامیہ",
+    contactPlaceholder: "فون / ای میل یہاں شامل ہوگا",
     copyrightLine: "تمام حقوق محفوظ ہیں۔",
   },
 };
