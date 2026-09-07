@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc, collection, getDocs, writeBatch } from "firebase/firestore";
+import { doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where } from "firebase/firestore";
 import { auth, db, createMemberAuthAccount } from "./firebaseConfig";
 import {
   BookOpenText,
@@ -430,6 +430,45 @@ export default function App() {
   const [membersWriteError, setMembersWriteError] = useState(false);
   const [paymentsWriteError, setPaymentsWriteError] = useState(false);
 
+  /* ---- STEP 3-C.4A: Member Login — targeted lookup, not the global list ----
+     Member Login must NOT depend on the globally-loaded `members` array
+     (that array is fetched once for Admin/public-stats/Encouragement
+     purposes and is incompatible with a future Firestore rule that
+     restricts `members` reads to "Admin, or your own active record").
+     Instead, the moment someone is on the member-portal view AND signed
+     in, this runs its own narrow, targeted query:
+       query(collection(db, "members"), where("authUid", "==", authUser.uid))
+     That query only ever asks Firestore for documents matching the
+     signer's own UID — exactly the shape a per-member security rule can
+     safely allow, with no dependency on a broader collection read. */
+  const [memberLookupStatus, setMemberLookupStatus] = useState("idle"); // idle | loading | done
+  const [memberLookupResult, setMemberLookupResult] = useState(null);
+
+  useEffect(() => {
+    if (view !== "member-portal" || !authUser) {
+      return;
+    }
+    let cancelled = false;
+    async function lookupOwnMember() {
+      setMemberLookupStatus("loading");
+      try {
+        const q = query(collection(db, "members"), where("authUid", "==", authUser.uid));
+        const snap = await getDocs(q);
+        if (cancelled) return;
+        const activeMatch = snap.docs.map((d) => d.data()).find((m) => m.status === "active");
+        setMemberLookupResult(activeMatch || null);
+      } catch (err) {
+        console.error("Member login lookup failed:", err);
+        if (!cancelled) setMemberLookupResult(null);
+      }
+      if (!cancelled) setMemberLookupStatus("done");
+    }
+    lookupOwnMember();
+    return () => {
+      cancelled = true;
+    };
+  }, [view, authUser]);
+
   useEffect(() => {
     async function loadData() {
       // kwo/data — everything EXCEPT members/payments, which now come
@@ -804,14 +843,16 @@ export default function App() {
     );
   }
 
-  /* ---- STEP 3-A: Member Login — foundation only ----
+  /* ---- STEP 3-A/3-C.4A: Member Login ----
      Completely separate from the Admin gate above (ADMIN_ONLY_VIEWS never
      includes "member-portal", so none of the Admin/role logic runs here).
      This only answers ONE question: is the signed-in Firebase Auth UID
      linked (via authUid) to a member whose status is currently 'active'?
-     It does NOT read or show any Fund/payment data, and does NOT grant
-     Admin access under any circumstance — those are explicitly later
-     steps. Inactive/archived members are treated exactly like an
+     As of Step 3-C.4A, that answer comes from a targeted Firestore query
+     (memberLookupResult, above) rather than the globally-loaded `members`
+     array — see the effect above for why. It does NOT read or show any
+     Fund/payment data, and does NOT grant Admin access under any
+     circumstance. Inactive/archived members are treated exactly like an
      unmatched account (not authorized). */
   if (view === "member-portal") {
     if (authLoading) {
@@ -826,12 +867,14 @@ export default function App() {
         />
       );
     }
-    const matchedMember = members.find((m) => m.authUid === authUser.uid && m.status === "active");
-    if (matchedMember) {
+    if (memberLookupStatus === "idle" || memberLookupStatus === "loading") {
+      return <AuthLoadingScreen theme={siteConfig.theme} />;
+    }
+    if (memberLookupResult) {
       return (
         <MemberDashboard
           theme={siteConfig.theme}
-          member={matchedMember}
+          member={memberLookupResult}
           orgNameUrdu={siteConfig.orgNameUrdu}
           onLogout={() => { signOut(auth); setView("home"); }}
           onBackToSite={() => setView("home")}
