@@ -319,6 +319,8 @@ export default function App() {
   const [fundConfig, setFundConfig] = useState(DEFAULT_FUND_CONFIG);
   const [members, setMembers] = useState(DEFAULT_MEMBERS);
   const [payments, setPayments] = useState(DEFAULT_PAYMENTS);
+  const [publicMembers, setPublicMembers] = useState([]);
+  const [publicMembersLoadError, setPublicMembersLoadError] = useState(false);
   const [paymentDeletionLog, setPaymentDeletionLog] = useState(DEFAULT_PAYMENT_DELETION_LOG);
   const [expenses, setExpenses] = useState(DEFAULT_EXPENSES);
   const [dastoorChapters, setDastoorChapters] = useState(DEFAULT_DASTOOR_CHAPTERS);
@@ -519,6 +521,21 @@ export default function App() {
         setPaymentsLoadError(true);
       }
 
+      // Public-safe member data (STEP 3-C.4B) — ONLY id/name/photo/status,
+      // no authUid/contact/notes. This is what public pages (Home Page
+      // member counts, Encouragement names/photos) read from, so they
+      // never need to touch the protected `members` collection at all.
+      // Non-fatal on failure — a public page should degrade to showing
+      // nothing/zero rather than break the whole site.
+      try {
+        const publicMemberSnap = await getDocs(collection(db, "publicMembers"));
+        setPublicMembers(publicMemberSnap.docs.map((docSnap) => docSnap.data()));
+        setPublicMembersLoadError(false);
+      } catch (err) {
+        console.error("Failed to load public member data:", err);
+        setPublicMembersLoadError(true);
+      }
+
       setDataLoaded(true);
     }
     loadData();
@@ -554,6 +571,31 @@ export default function App() {
     } catch (err) {
       console.error("Member write to secure collection failed:", err);
       setMembersWriteError(true);
+      return false;
+    }
+  }
+
+  /* ---- STEP 3-C.4B: public-safe member mirror ----
+     Writes ONLY id/name/photo/status into publicMembers/{id} — deliberately
+     never authUid, contact info, notes, or joiningDate. This keeps the
+     protected `members` collection as the sole authoritative/private
+     record while giving public pages (Home Page counts, Encouragement
+     names/photos) something safe to read instead. */
+  async function mirrorPublicMembersToCollection(memberList) {
+    try {
+      const batch = writeBatch(db);
+      memberList.forEach((m) => {
+        batch.set(doc(db, "publicMembers", m.id), {
+          id: m.id,
+          name: m.name,
+          photo: m.photo || "",
+          status: m.status,
+        });
+      });
+      await batch.commit();
+      return true;
+    } catch (err) {
+      console.error("Public member mirror write failed:", err);
       return false;
     }
   }
@@ -715,6 +757,12 @@ export default function App() {
           // though the live app itself never reads it back. The dedicated
           // `members` collection below is now the ONLY place this is saved.
           mirrorMembersToCollection(nextMembers); // real, live save
+          // Keep the public-safe mirror in sync (STEP 3-C.4B) — also update
+          // local state immediately so Home Page/Encouragement reflect the
+          // change without waiting for a reload.
+          const nextPublic = nextMembers.map((m) => ({ id: m.id, name: m.name, photo: m.photo || "", status: m.status }));
+          setPublicMembers(nextPublic);
+          mirrorPublicMembersToCollection(nextMembers);
         }}
         onBack={() => setView("admin")}
       />
@@ -931,7 +979,7 @@ export default function App() {
         theme={siteConfig.theme}
         card={openCard}
         achievements={achievements}
-        members={members}
+        members={publicMembers}
         payments={payments}
         currency={fundConfig.currency}
         onBack={() => setView("home")}
@@ -947,7 +995,7 @@ export default function App() {
       siteConfig={siteConfig}
       cardRegistry={cardRegistry}
       fundConfig={fundConfig}
-      members={members}
+      members={publicMembers}
       contactInfo={contactInfo}
       onOpenAdmin={() => setView("admin")}
       onOpenMemberLogin={() => setView("member-portal")}
